@@ -1,0 +1,13 @@
+{
+  "host": "0.0.0.0",
+  "port": 8005,
+  "public_ip": "",
+  "username": "admin",
+  "password": "change-me",
+  "monitor": 1,
+  "fps": 5,
+  "jpeg_quality": 60,
+  "max_width": 1600,
+  "draw_cursor": true,
+  "allow_input": true
+}

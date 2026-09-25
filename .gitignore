@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+# Local settings: password and public IP
+config.json

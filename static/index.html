@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
+<title>ScreenSender</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  body { display: flex; flex-direction: column; height: 100dvh; font-family: system-ui, sans-serif; }
+  #screen {
+    flex: 1; min-height: 0; width: 100%;
+    object-fit: contain;
+    touch-action: manipulation;      /* pinch-zoom ok, no double-tap zoom delay */
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+  }
+  #bar {
+    position: fixed; top: 8px; right: 8px; display: flex; gap: 6px; z-index: 2;
+    font-size: 14px;
+  }
+  #bar button {
+    background: rgba(40,40,40,.75); color: #fff; border: 1px solid #666;
+    border-radius: 6px; padding: 6px 10px; font: inherit;
+  }
+  #bar button.on { background: rgba(0,120,215,.85); border-color: #3a9be8; }
+  #bar.hidden button:not(#toggleBar) { display: none; }
+  #status {
+    position: fixed; left: 8px; top: 8px; color: #fff; z-index: 2;
+    font-size: 13px; background: rgba(0,0,0,.6);
+    padding: 3px 8px; border-radius: 4px; pointer-events: none;
+  }
+  .ripple {
+    position: fixed; width: 30px; height: 30px; margin: -15px 0 0 -15px;
+    border-radius: 50%; border: 2px solid #fff; pointer-events: none; z-index: 3;
+    animation: ripple .4s ease-out forwards;
+  }
+  .ripple.right { border-color: #ffb000; }
+  @keyframes ripple { to { transform: scale(1.8); opacity: 0; } }
+
+  #kb {
+    display: none; flex-direction: column; gap: 6px; padding: 6px;
+    background: #1b1b1b; border-top: 1px solid #333;
+  }
+  #kb.open { display: flex; }
+  #kbInput {
+    width: 100%; box-sizing: border-box; padding: 10px; font-size: 16px; /* 16px: no iOS auto-zoom */
+    color: #fff; background: #2a2a2a; border: 1px solid #444; border-radius: 6px;
+  }
+  #kbInput:focus { outline: none; border-color: #3a9be8; }
+  .keys { display: flex; gap: 5px; overflow-x: auto; scrollbar-width: none; }
+  .keys::-webkit-scrollbar { display: none; }
+  .keys button {
+    flex: 0 0 auto; min-width: 42px; padding: 9px 10px; font-size: 15px;
+    color: #fff; background: #333; border: 1px solid #4a4a4a; border-radius: 6px;
+  }
+  .keys button:active { background: #555; }
+  .keys button.mod.on { background: #0078d7; border-color: #3a9be8; }
+</style>
+</head>
+<body>
+<img id="screen" alt="">
+<div id="kb">
+  <input id="kbInput" type="text" placeholder="Печатайте — текст сразу уходит на ПК"
+         autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
+  <div class="keys">
+    <button class="mod" data-mod="ctrl">Ctrl</button>
+    <button class="mod" data-mod="alt">Alt</button>
+    <button class="mod" data-mod="shift">Shift</button>
+    <button class="mod" data-mod="win">Win</button>
+    <button data-key="esc">Esc</button>
+    <button data-key="tab">Tab</button>
+    <button data-key="backspace">⌫</button>
+    <button data-key="delete">Del</button>
+    <button data-key="enter">Enter ⏎</button>
+  </div>
+  <div class="keys">
+    <button data-key="left">←</button>
+    <button data-key="up">↑</button>
+    <button data-key="down">↓</button>
+    <button data-key="right">→</button>
+    <button data-key="home">Home</button>
+    <button data-key="end">End</button>
+    <button data-key="pageup">PgUp</button>
+    <button data-key="pagedown">PgDn</button>
+    <button data-key="tab" data-mods="alt">Alt+Tab</button>
+    <button data-key="c" data-mods="ctrl">Копир.</button>
+    <button data-key="v" data-mods="ctrl">Вставить</button>
+    <button data-key="z" data-mods="ctrl">Отмена</button>
+    <button data-key="f5">F5</button>
+  </div>
+</div>
+<div id="bar">
+  <button id="clicks" class="on">Клики</button>
+  <button id="kbBtn">⌨</button>
+  <button id="fs">⛶</button>
+  <button id="toggleBar">☰</button>
+</div>
+<div id="status">Подключение…</div>
+
+<script>
+const img = document.getElementById('screen');
+const statusEl = document.getElementById('status');
+const clicksBtn = document.getElementById('clicks');
+const kbBtn = document.getElementById('kbBtn');
+let clicksOn = true;
+let inputAllowed = false;
+
+function setStatus(text) {
+  statusEl.textContent = text;
+  statusEl.style.display = text ? '' : 'none';
+}
+
+// ---- frames: request the next one only after the previous has been shown,
+// so a slow connection lowers the frame rate instead of piling up delay.
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+let frameUrl = null;
+
+async function showFrame(blob) {
+  const url = URL.createObjectURL(blob);
+  img.src = url;
+  try { await img.decode(); } catch {}
+  if (frameUrl) URL.revokeObjectURL(frameUrl);
+  frameUrl = url;
+}
+
+async function frameLoop() {
+  let seq = -1;
+  for (;;) {
+    if (document.hidden) { await sleep(500); continue; }   // tab in background: no traffic
+    try {
+      const r = await fetch('frame.jpg?after=' + seq, { cache: 'no-store' });
+      if (r.status === 401) { location.href = 'login'; return; }  // session expired
+      if (r.status === 200) {
+        seq = Number(r.headers.get('X-Frame-Seq'));
+        await showFrame(await r.blob());
+        setStatus('');
+      } else if (r.status !== 204) {
+        throw new Error('HTTP ' + r.status);
+      }
+    } catch {
+      setStatus('Нет связи, переподключение…');
+      await sleep(2000);
+    }
+  }
+}
+
+fetch('info').then(r => r.json()).then(info => {
+  inputAllowed = info.input;
+  if (!inputAllowed) {
+    clicksOn = false;
+    clicksBtn.style.display = 'none';
+    kbBtn.style.display = 'none';
+  }
+}).catch(() => {});
+frameLoop();
+
+// ---- toolbar
+clicksBtn.onclick = () => {
+  clicksOn = !clicksOn;
+  clicksBtn.classList.toggle('on', clicksOn);
+};
+document.getElementById('fs').onclick = () => {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else document.documentElement.requestFullscreen?.();
+};
+document.getElementById('toggleBar').onclick = () =>
+  document.getElementById('bar').classList.toggle('hidden');
+
+// ---- tap -> left click, long press -> right click
+const LONG_PRESS_MS = 550;
+const MOVE_TOLERANCE = 12;
+let press = null;
+let activePointers = 0;
+
+// Maps a viewport point to 0..1 coordinates on the picture, accounting for letterboxing.
+function toImageCoords(clientX, clientY) {
+  if (!img.naturalWidth) return null;
+  const r = img.getBoundingClientRect();
+  const scale = Math.min(r.width / img.naturalWidth, r.height / img.naturalHeight);
+  const w = img.naturalWidth * scale, h = img.naturalHeight * scale;
+  const x = (clientX - r.left - (r.width - w) / 2) / w;
+  const y = (clientY - r.top - (r.height - h) / 2) / h;
+  return (x < 0 || x > 1 || y < 0 || y > 1) ? null : { x, y };
+}
+
+function ripple(clientX, clientY, right) {
+  const d = document.createElement('div');
+  d.className = 'ripple' + (right ? ' right' : '');
+  d.style.left = clientX + 'px';
+  d.style.top = clientY + 'px';
+  document.body.appendChild(d);
+  setTimeout(() => d.remove(), 450);
+}
+
+function sendClick(clientX, clientY, button) {
+  const p = toImageCoords(clientX, clientY);
+  if (!p) return;
+  ripple(clientX, clientY, button === 'right');
+  fetch('click', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ x: p.x, y: p.y, button }),
+  }).catch(() => setStatus('Клик не отправлен'));
+}
+
+function cancelPress() {
+  if (press) clearTimeout(press.timer);
+  press = null;
+}
+
+img.addEventListener('pointerdown', e => {
+  activePointers++;
+  if (!clicksOn || !inputAllowed) return;
+  if (activePointers > 1) { cancelPress(); return; }   // pinch: no clicks
+  if (e.pointerType === 'mouse' && e.button !== 0) return;
+  const x = e.clientX, y = e.clientY;
+  press = {
+    x, y,
+    timer: setTimeout(() => { sendClick(x, y, 'right'); press = null; }, LONG_PRESS_MS),
+  };
+});
+img.addEventListener('pointermove', e => {
+  if (press && Math.hypot(e.clientX - press.x, e.clientY - press.y) > MOVE_TOLERANCE) cancelPress();
+});
+img.addEventListener('pointerup', e => {
+  activePointers = Math.max(0, activePointers - 1);
+  if (!press) return;
+  const { x, y } = press;
+  cancelPress();
+  sendClick(x, y, 'left');
+});
+img.addEventListener('pointercancel', () => {
+  activePointers = Math.max(0, activePointers - 1);
+  cancelPress();
+});
+img.addEventListener('contextmenu', e => {
+  e.preventDefault();
+  // Desktop browser: real right button goes straight through.
+  if (clicksOn && inputAllowed && e.pointerType !== 'touch' && !('ontouchstart' in window)) {
+    sendClick(e.clientX, e.clientY, 'right');
+  }
+});
+img.addEventListener('dragstart', e => e.preventDefault());
+
+// ---- keyboard
+const kb = document.getElementById('kb');
+const kbInput = document.getElementById('kbInput');
+
+// Actions are batched and sent strictly one request at a time, so keystrokes never reorder.
+let keyQueue = [];
+let keyBusy = false;
+function sendKeys(...actions) {
+  keyQueue.push(...actions);
+  flushKeys();
+}
+async function flushKeys() {
+  if (keyBusy || !keyQueue.length) return;
+  keyBusy = true;
+  const actions = keyQueue;
+  keyQueue = [];
+  try {
+    const r = await fetch('key', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ actions }),
+    });
+    if (!r.ok) setStatus('Клавиши не отправлены');
+  } catch {
+    setStatus('Клавиши не отправлены');
+  }
+  keyBusy = false;
+  flushKeys();
+}
+
+// Sticky modifiers: tap Ctrl, then a key -> Ctrl+key. Tapping an active modifier again sends it alone.
+const mods = new Set();
+const modButtons = [...kb.querySelectorAll('.mod')];
+function refreshMods() {
+  modButtons.forEach(b => b.classList.toggle('on', mods.has(b.dataset.mod)));
+}
+function takeMods() {
+  const list = [...mods];
+  mods.clear();
+  refreshMods();
+  return list;
+}
+modButtons.forEach(b => b.addEventListener('click', () => {
+  const m = b.dataset.mod;
+  if (mods.has(m)) {
+    mods.delete(m);
+    sendKeys({ key: m, mods: takeMods() });
+  } else {
+    mods.add(m);
+    refreshMods();
+  }
+}));
+
+kb.querySelectorAll('[data-key]').forEach(b => {
+  // Keep focus in the text field so the phone keyboard does not close on every button tap.
+  b.addEventListener('pointerdown', e => e.preventDefault());
+  b.addEventListener('click', () => {
+    const extra = b.dataset.mods ? b.dataset.mods.split(',') : [];
+    sendKeys({ key: b.dataset.key, mods: [...new Set([...takeMods(), ...extra])] });
+  });
+});
+modButtons.forEach(b => b.addEventListener('pointerdown', e => e.preventDefault()));
+
+// Russian layout letters -> the Latin key at the same position, so Ctrl+С works like Ctrl+C.
+const RU = 'йцукенгшщзхъфывапролджэячсмитьбю', EN = "qwertyuiop[]asdfghjkl;'zxcvbnm,.";
+function comboKey(ch) {
+  ch = ch.toLowerCase();
+  const i = RU.indexOf(ch);
+  if (i >= 0) ch = EN[i];
+  return /^[a-z0-9]$/.test(ch) ? ch : null;
+}
+
+// The field always holds a sentinel space, so Backspace on an "empty" field is still visible
+// as a deletion. Every change is diffed against the previous value and replayed on the PC,
+// which also covers autocorrect and predictive text replacing whole words.
+const SENTINEL = ' ';
+let prevValue = SENTINEL;
+function resetField() {
+  kbInput.value = SENTINEL;
+  prevValue = SENTINEL;
+}
+resetField();
+
+kbInput.addEventListener('input', e => {
+  const cur = kbInput.value;
+  let start = 0;
+  while (start < prevValue.length && start < cur.length && prevValue[start] === cur[start]) start++;
+  let end = 0;
+  while (end < prevValue.length - start && end < cur.length - start
+         && prevValue[prevValue.length - 1 - end] === cur[cur.length - 1 - end]) end++;
+  const removed = prevValue.length - start - end;
+  const added = cur.slice(start, cur.length - end);
+  prevValue = cur;
+
+  const combo = mods.size && removed === 0 && added.length === 1 ? comboKey(added) : null;
+  if (combo) {
+    sendKeys({ key: combo, mods: takeMods() });
+  } else {
+    if (removed > 0) sendKeys({ key: 'backspace', repeat: Math.min(removed, 100) });
+    if (added) sendKeys({ text: added });
+  }
+  if (!e.isComposing && (cur.length === 0 || cur.length > 200)) resetField();
+});
+kbInput.addEventListener('compositionend', () => {
+  if (kbInput.value.length === 0) resetField();
+});
+
+// Keys that do not change the field text (and a physical keyboard on a desktop browser).
+const PASS_KEYS = {
+  Enter: 'enter', Tab: 'tab', Escape: 'esc', Delete: 'delete',
+  ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDown: 'down',
+  Home: 'home', End: 'end', PageUp: 'pageup', PageDown: 'pagedown',
+};
+kbInput.addEventListener('keydown', e => {
+  if (e.isComposing || e.keyCode === 229) return;
+  const physMods = ['ctrl', 'alt', 'shift', 'win'].filter((m, i) =>
+    [e.ctrlKey, e.altKey, e.shiftKey, e.metaKey][i]);
+  let key = PASS_KEYS[e.key] || (/^F\d{1,2}$/.test(e.key) ? e.key.toLowerCase() : null);
+  if (!key && (e.ctrlKey || e.altKey || e.metaKey) && e.key.length === 1) key = comboKey(e.key);
+  if (!key) return;
+  e.preventDefault();
+  sendKeys({ key, mods: [...new Set([...takeMods(), ...physMods])] });
+  if (key === 'enter') resetField();
+});
+
+kbBtn.onclick = () => {
+  const open = kb.classList.toggle('open');
+  kbBtn.classList.toggle('on', open);
+  if (open) { resetField(); kbInput.focus(); } else kbInput.blur();
+};
+</script>
+</body>
+</html>
