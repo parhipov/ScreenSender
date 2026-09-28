@@ -57,7 +57,7 @@
 </style>
 </head>
 <body>
-<img id="screen" alt="">
+<canvas id="screen"></canvas>
 <div id="kb">
   <input id="kbInput" type="text" placeholder="Печатайте — текст сразу уходит на ПК"
          autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
@@ -83,12 +83,14 @@
     <button data-key="pagedown">PgDn</button>
     <button data-key="tab" data-mods="alt">Alt+Tab</button>
     <button data-key="c" data-mods="ctrl">Копир.</button>
-    <button data-key="v" data-mods="ctrl">Вставить</button>
+    <button id="pastePhone">📋 С телефона</button>
+    <button data-key="v" data-mods="ctrl">Ctrl+V</button>
     <button data-key="z" data-mods="ctrl">Отмена</button>
     <button data-key="f5">F5</button>
   </div>
 </div>
 <div id="bar">
+  <button id="monBtn" style="display:none"></button>
   <button id="clicks" class="on">Клики</button>
   <button id="kbBtn">⌨</button>
   <button id="fs">⛶</button>
@@ -97,7 +99,8 @@
 <div id="status">Подключение…</div>
 
 <script>
-const img = document.getElementById('screen');
+const screen = document.getElementById('screen');
+const ctx = screen.getContext('2d');
 const statusEl = document.getElementById('status');
 const clicksBtn = document.getElementById('clicks');
 const kbBtn = document.getElementById('kbBtn');
@@ -108,31 +111,89 @@ function setStatus(text) {
   statusEl.textContent = text;
   statusEl.style.display = text ? '' : 'none';
 }
+// A message that survives the next frames for a few seconds (setStatus('') clears on every frame).
+let hintUntil = 0;
+function hint(text) {
+  setStatus(text);
+  hintUntil = Date.now() + 3000;
+}
 
-// ---- frames: request the next one only after the previous has been shown,
+// ---- frames: request the next update only after the previous one has been drawn,
 // so a slow connection lowers the frame rate instead of piling up delay.
+// An update holds only the parts of the screen that changed; they are painted over the canvas.
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-let frameUrl = null;
+let epoch = 0, seq = -1, haveFrame = false;
 
-async function showFrame(blob) {
-  const url = URL.createObjectURL(blob);
-  img.src = url;
-  try { await img.decode(); } catch {}
-  if (frameUrl) URL.revokeObjectURL(frameUrl);
-  frameUrl = url;
+function decodeJpeg(blob) {
+  if (window.createImageBitmap) return createImageBitmap(blob);
+  return new Promise((resolve, reject) => {
+    const im = new Image();
+    const url = URL.createObjectURL(blob);
+    im.onload = () => { URL.revokeObjectURL(url); resolve(im); };
+    im.onerror = reject;
+    im.src = url;
+  });
+}
+
+// The PC pointer is drawn by the page: the pixels under it are saved and put back before
+// the next update, so its moves need no picture data.
+const CURSOR_R = 6;
+let cursorPatch = null;
+function hideCursor() {
+  if (cursorPatch) ctx.putImageData(cursorPatch.data, cursorPatch.x, cursorPatch.y);
+  cursorPatch = null;
+}
+function drawCursor(pos) {
+  if (!pos) return;
+  const [cx, cy] = pos, s = CURSOR_R + 2;
+  cursorPatch = { x: cx - s, y: cy - s, data: ctx.getImageData(cx - s, cy - s, 2 * s, 2 * s) };
+  ctx.beginPath();
+  ctx.arc(cx, cy, CURSOR_R - 1, 0, 2 * Math.PI);
+  ctx.fillStyle = '#ff2828';
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = '#fff';
+  ctx.stroke();
+}
+
+// Update format: 4-byte header length, JSON header, then the JPEG pieces back to back.
+async function applyUpdate(buf) {
+  const headLen = new DataView(buf).getUint32(0);
+  const meta = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, headLen)));
+  let offset = 4 + headLen;
+  const pieces = await Promise.all(meta.rects.map(([x, y, len]) => {
+    const blob = new Blob([new Uint8Array(buf, offset, len)], { type: 'image/jpeg' });
+    offset += len;
+    return decodeJpeg(blob).then(bmp => ({ x, y, bmp }));
+  }));
+  // Everything is decoded first and painted in one go, so a frame never shows half-updated.
+  if (meta.epoch !== epoch || screen.width !== meta.width || screen.height !== meta.height) {
+    screen.width = meta.width;   // resizing also clears the canvas
+    screen.height = meta.height;
+    cursorPatch = null;
+  } else {
+    hideCursor();
+  }
+  for (const p of pieces) {
+    ctx.drawImage(p.bmp, p.x, p.y);
+    p.bmp.close?.();
+  }
+  drawCursor(meta.cursor);
+  epoch = meta.epoch;
+  seq = meta.seq;
+  haveFrame = true;
+  if (meta.monitor !== monitor) { monitor = meta.monitor; refreshMonitor(); }
 }
 
 async function frameLoop() {
-  let seq = -1;
   for (;;) {
     if (document.hidden) { await sleep(500); continue; }   // tab in background: no traffic
     try {
-      const r = await fetch('frame.jpg?after=' + seq, { cache: 'no-store' });
+      const r = await fetch(`frame?epoch=${epoch}&after=${seq}`, { cache: 'no-store' });
       if (r.status === 401) { location.href = 'login'; return; }  // session expired
       if (r.status === 200) {
-        seq = Number(r.headers.get('X-Frame-Seq'));
-        await showFrame(await r.blob());
-        setStatus('');
+        await applyUpdate(await r.arrayBuffer());
+        if (Date.now() > hintUntil) setStatus('');
       } else if (r.status !== 204) {
         throw new Error('HTTP ' + r.status);
       }
@@ -143,7 +204,34 @@ async function frameLoop() {
   }
 }
 
+// ---- monitor switching: the button cycles through the PC monitors (and "all" at the end)
+const monBtn = document.getElementById('monBtn');
+let monitors = [], monitor = null;
+function refreshMonitor() {
+  monBtn.textContent = '🖥 ' + (monitor === 0 ? 'все' : monitor);
+  monBtn.style.display = monitors.length > 1 ? '' : 'none';
+}
+monBtn.onclick = async () => {
+  const i = monitors.findIndex(m => m.index === monitor);
+  const next = monitors[(i + 1) % monitors.length].index;
+  try {
+    const r = await fetch('monitor', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ index: next }),
+    });
+    if (!r.ok) throw new Error();
+    monitor = (await r.json()).monitor;
+    refreshMonitor();
+  } catch {
+    hint('Монитор не переключён');
+  }
+};
+
 fetch('info').then(r => r.json()).then(info => {
+  monitors = info.monitors;
+  if (monitor === null) monitor = info.monitor;
+  refreshMonitor();
   inputAllowed = info.input;
   if (!inputAllowed) {
     clicksOn = false;
@@ -173,10 +261,10 @@ let activePointers = 0;
 
 // Maps a viewport point to 0..1 coordinates on the picture, accounting for letterboxing.
 function toImageCoords(clientX, clientY) {
-  if (!img.naturalWidth) return null;
-  const r = img.getBoundingClientRect();
-  const scale = Math.min(r.width / img.naturalWidth, r.height / img.naturalHeight);
-  const w = img.naturalWidth * scale, h = img.naturalHeight * scale;
+  if (!haveFrame) return null;
+  const r = screen.getBoundingClientRect();
+  const scale = Math.min(r.width / screen.width, r.height / screen.height);
+  const w = screen.width * scale, h = screen.height * scale;
   const x = (clientX - r.left - (r.width - w) / 2) / w;
   const y = (clientY - r.top - (r.height - h) / 2) / h;
   return (x < 0 || x > 1 || y < 0 || y > 1) ? null : { x, y };
@@ -199,7 +287,7 @@ function sendClick(clientX, clientY, button) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ x: p.x, y: p.y, button }),
-  }).catch(() => setStatus('Клик не отправлен'));
+  }).catch(() => hint('Клик не отправлен'));
 }
 
 function cancelPress() {
@@ -207,7 +295,7 @@ function cancelPress() {
   press = null;
 }
 
-img.addEventListener('pointerdown', e => {
+screen.addEventListener('pointerdown', e => {
   activePointers++;
   if (!clicksOn || !inputAllowed) return;
   if (activePointers > 1) { cancelPress(); return; }   // pinch: no clicks
@@ -218,28 +306,28 @@ img.addEventListener('pointerdown', e => {
     timer: setTimeout(() => { sendClick(x, y, 'right'); press = null; }, LONG_PRESS_MS),
   };
 });
-img.addEventListener('pointermove', e => {
+screen.addEventListener('pointermove', e => {
   if (press && Math.hypot(e.clientX - press.x, e.clientY - press.y) > MOVE_TOLERANCE) cancelPress();
 });
-img.addEventListener('pointerup', e => {
+screen.addEventListener('pointerup', e => {
   activePointers = Math.max(0, activePointers - 1);
   if (!press) return;
   const { x, y } = press;
   cancelPress();
   sendClick(x, y, 'left');
 });
-img.addEventListener('pointercancel', () => {
+screen.addEventListener('pointercancel', () => {
   activePointers = Math.max(0, activePointers - 1);
   cancelPress();
 });
-img.addEventListener('contextmenu', e => {
+screen.addEventListener('contextmenu', e => {
   e.preventDefault();
   // Desktop browser: real right button goes straight through.
   if (clicksOn && inputAllowed && e.pointerType !== 'touch' && !('ontouchstart' in window)) {
     sendClick(e.clientX, e.clientY, 'right');
   }
 });
-img.addEventListener('dragstart', e => e.preventDefault());
+screen.addEventListener('dragstart', e => e.preventDefault());
 
 // ---- keyboard
 const kb = document.getElementById('kb');
@@ -263,9 +351,9 @@ async function flushKeys() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ actions }),
     });
-    if (!r.ok) setStatus('Клавиши не отправлены');
+    if (!r.ok) hint('Клавиши не отправлены');
   } catch {
-    setStatus('Клавиши не отправлены');
+    hint('Клавиши не отправлены');
   }
   keyBusy = false;
   flushKeys();
@@ -340,7 +428,10 @@ kbInput.addEventListener('input', e => {
     sendKeys({ key: combo, mods: takeMods() });
   } else {
     if (removed > 0) sendKeys({ key: 'backspace', repeat: Math.min(removed, 100) });
-    if (added) sendKeys({ text: added });
+    // Keyboards' clipboard suggestions insert text without a paste event; long inserts go
+    // through the PC clipboard too.
+    if (added) sendKeys(e.inputType === 'insertFromPaste' || added.length > PASTE_MIN
+      ? { paste: added } : { text: added });
   }
   if (!e.isComposing && (cur.length === 0 || cur.length > 200)) resetField();
 });
@@ -361,9 +452,35 @@ kbInput.addEventListener('keydown', e => {
   let key = PASS_KEYS[e.key] || (/^F\d{1,2}$/.test(e.key) ? e.key.toLowerCase() : null);
   if (!key && (e.ctrlKey || e.altKey || e.metaKey) && e.key.length === 1) key = comboKey(e.key);
   if (!key) return;
+  if (key === 'v' && (e.ctrlKey || e.metaKey) && !e.altKey) return;  // browser paste -> 'paste' event
   e.preventDefault();
   sendKeys({ key, mods: [...new Set([...takeMods(), ...physMods])] });
   if (key === 'enter') resetField();
+});
+
+// ---- paste from the phone: the text is put into the PC clipboard and pasted with Ctrl+V.
+const PASTE_MIN = 100;
+function pasteText(text) {
+  if (!inputAllowed || !text) return;
+  takeMods();
+  sendKeys({ paste: text });
+}
+document.addEventListener('paste', e => {
+  const text = e.clipboardData?.getData('text/plain');
+  if (!text) return;
+  e.preventDefault();
+  pasteText(text);
+});
+const pasteBtn = document.getElementById('pastePhone');
+pasteBtn.addEventListener('pointerdown', e => e.preventDefault());
+pasteBtn.addEventListener('click', async () => {
+  // Reading the clipboard directly works only over HTTPS; otherwise the phone's own
+  // "Paste" in the text field does the same through the paste event above.
+  if (navigator.clipboard?.readText) {
+    try { pasteText(await navigator.clipboard.readText()); return; } catch {}
+  }
+  kbInput.focus();
+  hint('Удерживайте поле ввода → «Вставить»');
 });
 
 kbBtn.onclick = () => {

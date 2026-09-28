@@ -1,20 +1,22 @@
-"""ScreenSender: streams the desktop as MJPEG to a web page and accepts mouse clicks back."""
+"""ScreenSender: shows the desktop on a web page (sending only changed tiles) and accepts input back."""
 
 import ctypes
 import hmac
 import io
 import json
 import logging
+import random
 import socket
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import flask.cli
 import mss
 from flask import Flask, Response, jsonify, redirect, request, send_from_directory
-from PIL import Image, ImageDraw
+from PIL import Image, ImageChops
 
 MSS = getattr(mss, "MSS", None) or mss.mss  # mss 10 renamed the class
 
@@ -31,6 +33,7 @@ DEFAULT_CONFIG = {
     "fps": 5,
     "jpeg_quality": 60,
     "max_width": 1600,
+    "tile_size": 64,
     "draw_cursor": True,
     "allow_input": True,
 }
@@ -194,26 +197,148 @@ class Keyboard:
             self._send(events)
 
 
+# ---------------------------------------------------------------- clipboard
+
+CF_UNICODETEXT = 13
+GMEM_MOVEABLE = 0x0002
+HWND_MESSAGE = -3
+
+
+class Clipboard:
+    def __init__(self):
+        self._lock = threading.Lock()
+        if not IS_WINDOWS:
+            return
+        # Own DLL handles, so the argtypes set here do not affect ctypes.windll used elsewhere.
+        self.user32 = u = ctypes.WinDLL("user32")
+        self.kernel32 = k = ctypes.WinDLL("kernel32")
+        vp = ctypes.c_void_p
+        u.CreateWindowExW.restype = vp
+        u.CreateWindowExW.argtypes = [ctypes.c_ulong, ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_ulong,
+                                      ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                      vp, vp, vp, vp]
+        u.DestroyWindow.argtypes = [vp]
+        u.OpenClipboard.argtypes = [vp]
+        u.SetClipboardData.restype = vp
+        u.SetClipboardData.argtypes = [ctypes.c_uint, vp]
+        k.GlobalAlloc.restype = vp
+        k.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
+        k.GlobalLock.restype = vp
+        k.GlobalLock.argtypes = [vp]
+        k.GlobalUnlock.argtypes = [vp]
+        k.GlobalFree.argtypes = [vp]
+
+    def set_text(self, text):
+        data = (text.replace("\r\n", "\n").replace("\n", "\r\n") + "\0").encode("utf-16-le")
+        u, k = self.user32, self.kernel32
+        with self._lock:
+            # EmptyClipboard without an owner window makes SetClipboardData fail, so borrow a
+            # hidden message-only window for the duration of the call.
+            hwnd = u.CreateWindowExW(0, "STATIC", None, 0, 0, 0, 0, 0, HWND_MESSAGE, None, None, None)
+            try:
+                for _ in range(20):  # another program may be holding the clipboard for a moment
+                    if u.OpenClipboard(hwnd):
+                        break
+                    time.sleep(0.05)
+                else:
+                    raise RuntimeError("clipboard is busy")
+                try:
+                    u.EmptyClipboard()
+                    handle = k.GlobalAlloc(GMEM_MOVEABLE, len(data))
+                    if not handle:
+                        raise RuntimeError("out of memory")
+                    ctypes.memmove(k.GlobalLock(handle), data, len(data))
+                    k.GlobalUnlock(handle)
+                    if not u.SetClipboardData(CF_UNICODETEXT, handle):
+                        k.GlobalFree(handle)
+                        raise RuntimeError("SetClipboardData failed")
+                finally:
+                    u.CloseClipboard()
+            finally:
+                if hwnd:
+                    u.DestroyWindow(hwnd)
+
+
 # ---------------------------------------------------------------- capture
 
-class Grabber(threading.Thread):
-    """Single capture loop shared by all viewers; idles when nobody is watching."""
+# Past this share of changed tiles one whole-screen JPEG is smaller and faster than many pieces.
+FULL_FRAME_SHARE = 0.5
 
-    def __init__(self, monitor_index, fps, quality, max_width, draw_cursor):
+
+@dataclass(frozen=True)
+class Frame:
+    epoch: int         # changes with the picture geometry; viewers then reload it whole
+    seq: int
+    monitor: dict
+    monitor_index: int
+    img: Image.Image
+    cols: int
+    rows: int
+    tile_seq: list     # per tile: seq of the frame where it last changed
+    cursor: tuple      # (x, y) in picture pixels, or None
+
+
+def list_monitors():
+    with MSS() as sct:
+        return [dict(m) for m in sct.monitors]
+
+
+def tile_rects(mask, cols, rows, ts, width, height):
+    """Groups marked tiles into rectangles: runs within a row, extended down while the run repeats."""
+    rects, open_rects = [], {}
+    for r in range(rows):
+        y1 = min((r + 1) * ts, height)
+        nxt = {}
+        c = 0
+        while c < cols:
+            if not mask[r * cols + c]:
+                c += 1
+                continue
+            c0 = c
+            while c < cols and mask[r * cols + c]:
+                c += 1
+            rect = open_rects.pop((c0, c), None)
+            if rect:
+                rect[3] = y1
+            else:
+                rect = [c0 * ts, r * ts, min(c * ts, width), y1]
+            nxt[(c0, c)] = rect
+        rects += open_rects.values()
+        open_rects = nxt
+    return rects + list(open_rects.values())
+
+
+class Grabber(threading.Thread):
+    """Single capture loop shared by all viewers; idles when nobody is watching.
+
+    The picture is split into tiles and every tile remembers the frame it last changed in,
+    so each viewer gets only the tiles that changed since the frame it already shows.
+    """
+
+    def __init__(self, monitor_index, fps, quality, max_width, draw_cursor, tile_size):
         super().__init__(daemon=True)
-        with MSS() as sct:
-            if not 0 <= monitor_index < len(sct.monitors):
-                raise SystemExit(f"monitor {monitor_index} not found, available: 0..{len(sct.monitors) - 1}")
-            self.monitor = dict(sct.monitors[monitor_index])
+        monitors = list_monitors()
+        if not 0 <= monitor_index < len(monitors):
+            raise SystemExit(f"monitor {monitor_index} not found, available: 0..{len(monitors) - 1}")
+        self.monitor_index = monitor_index
+        self.monitor = monitors[monitor_index]
         self.interval = 1.0 / max(1, fps)
         self.quality = quality
         self.max_width = max_width
         self.draw_cursor = draw_cursor
+        self.tile_size = max(16, tile_size)
         self._waiting = 0
         self._last_request = 0.0
         self._frame = None
-        self._seq = 0
         self._cond = threading.Condition()
+
+    def set_monitor(self, index):
+        monitors = list_monitors()  # re-read: resolution or layout may have changed since start
+        if not 0 <= index < len(monitors):
+            raise ValueError(f"monitor {index} not found")
+        with self._cond:
+            self.monitor_index = index
+            self.monitor = monitors[index]
 
     def run(self):
         # mss handles are thread-bound on Windows, so the instance lives in this thread.
@@ -223,60 +348,118 @@ class Grabber(threading.Thread):
                     time.sleep(0.2)
                     continue
                 started = time.monotonic()
-                frame = self._encode(sct.grab(self.monitor))
                 with self._cond:
-                    # An unchanged screen produces identical JPEG bytes; skipping it means a
-                    # static screen costs no bandwidth at all.
-                    if frame != self._frame:
-                        self._frame = frame
-                        self._seq += 1
-                        self._cond.notify_all()
+                    monitor, index = self.monitor, self.monitor_index
+                img = self._capture(sct, monitor)
+                self._update(img, self._cursor(monitor, img.width / monitor["width"]), monitor, index)
                 time.sleep(max(0.0, self.interval - (time.monotonic() - started)))
 
-    def _encode(self, shot):
+    def _capture(self, sct, monitor):
+        shot = sct.grab(monitor)
         img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
-        scale = 1.0
         if self.max_width and img.width > self.max_width:
-            scale = self.max_width / img.width
-            img = img.resize((self.max_width, round(img.height * scale)), Image.BILINEAR)
-        if self.draw_cursor:
-            pos = get_cursor_pos()
-            if pos:
-                cx = (pos[0] - self.monitor["left"]) * scale
-                cy = (pos[1] - self.monitor["top"]) * scale
-                r = 6
-                ImageDraw.Draw(img).ellipse((cx - r, cy - r, cx + r, cy + r),
-                                            fill=(255, 40, 40), outline=(255, 255, 255), width=2)
-        buf = io.BytesIO()
-        img.save(buf, "JPEG", quality=self.quality)
-        return buf.getvalue()
+            img = img.resize((self.max_width, round(img.height * self.max_width / img.width)),
+                             Image.BILINEAR)
+        return img
+
+    def _cursor(self, monitor, scale):
+        # Sent as coordinates and drawn by the page, so a moving pointer costs no picture data.
+        pos = get_cursor_pos() if self.draw_cursor else None
+        if not pos:
+            return None
+        x, y = pos[0] - monitor["left"], pos[1] - monitor["top"]
+        if not (0 <= x < monitor["width"] and 0 <= y < monitor["height"]):
+            return None
+        return round(x * scale), round(y * scale)
+
+    def _changed_tiles(self, prev, img, cols):
+        diff = ImageChops.difference(prev, img)
+        bbox = diff.getbbox()
+        if not bbox:
+            return []
+        ts = self.tile_size
+        changed = []
+        for r in range(bbox[1] // ts, (bbox[3] - 1) // ts + 1):
+            for c in range(bbox[0] // ts, (bbox[2] - 1) // ts + 1):
+                box = (c * ts, r * ts, min((c + 1) * ts, img.width), min((r + 1) * ts, img.height))
+                if diff.crop(box).getbbox():
+                    changed.append(r * cols + c)
+        return changed
+
+    def _update(self, img, cursor, monitor, index):
+        prev = self._frame  # only this thread replaces it
+        seq = prev.seq + 1 if prev else 1
+        if prev is None or prev.monitor is not monitor or prev.img.size != img.size:
+            cols = -(-img.width // self.tile_size)
+            rows = -(-img.height // self.tile_size)
+            frame = Frame(random.getrandbits(30) | 1, seq, monitor, index, img, cols, rows,
+                          [seq] * (cols * rows), cursor)
+        else:
+            changed = self._changed_tiles(prev.img, img, prev.cols)
+            if not changed and cursor == prev.cursor:
+                return  # a static screen costs no bandwidth at all
+            tile_seq = list(prev.tile_seq)
+            for i in changed:
+                tile_seq[i] = seq
+            frame = Frame(prev.epoch, seq, monitor, index, img, prev.cols, prev.rows, tile_seq, cursor)
+        with self._cond:
+            self._frame = frame
+            self._cond.notify_all()
 
     def _active(self):
         # Viewers poll frame by frame, so "someone is watching" means a request is waiting now
         # or arrived a moment ago (the gap while the phone downloads and draws a frame).
         return self._waiting > 0 or time.monotonic() - self._last_request < 3.0
 
-    def wait_frame(self, last_seq, timeout=10.0):
-        """Blocks until there is a frame newer than last_seq; returns (frame, seq) or (None, seq) on timeout."""
+    def wait_frame(self, epoch, after, timeout=10.0):
+        """Blocks until there is a frame the viewer (holding epoch/after) has not seen; None on timeout."""
         with self._cond:
             self._waiting += 1
             self._last_request = time.monotonic()
             try:
                 ready = self._cond.wait_for(
-                    lambda: self._frame is not None and self._seq != last_seq, timeout=timeout)
-                return (self._frame if ready else None), self._seq
+                    lambda: self._frame is not None
+                    and (self._frame.epoch != epoch or self._frame.seq != after), timeout=timeout)
+                return self._frame if ready else None
             finally:
                 self._waiting -= 1
                 self._last_request = time.monotonic()
 
+    def _jpeg(self, img):
+        buf = io.BytesIO()
+        img.save(buf, "JPEG", quality=self.quality)
+        return buf.getvalue()
 
-grabber = Grabber(cfg["monitor"], cfg["fps"], cfg["jpeg_quality"], cfg["max_width"], cfg["draw_cursor"])
+    def render_update(self, frame, epoch, after):
+        """Binary update: 4-byte header length, JSON header, then the JPEG pieces back to back."""
+        img = frame.img
+        full = frame.epoch != epoch or after > frame.seq
+        if not full:
+            mask = [s > after for s in frame.tile_seq]
+            full = sum(mask) > len(mask) * FULL_FRAME_SHARE
+        if full:
+            pieces = [(0, 0, self._jpeg(img))]
+        else:
+            rects = tile_rects(mask, frame.cols, frame.rows, self.tile_size, img.width, img.height)
+            pieces = [(r[0], r[1], self._jpeg(img.crop(r))) for r in rects]
+        header = json.dumps({
+            "epoch": frame.epoch, "seq": frame.seq, "monitor": frame.monitor_index,
+            "width": img.width, "height": img.height, "cursor": frame.cursor,
+            "rects": [[x, y, len(data)] for x, y, data in pieces],
+        }).encode()
+        return b"".join([len(header).to_bytes(4, "big"), header, *(data for _, _, data in pieces)])
+
+
+grabber = Grabber(cfg["monitor"], cfg["fps"], cfg["jpeg_quality"], cfg["max_width"],
+                  cfg["draw_cursor"], cfg["tile_size"])
 mouse = Mouse()
 keyboard = Keyboard()
+clipboard = Clipboard()
 
 # ---------------------------------------------------------------- web
 
 app = Flask(__name__, static_folder=None)
+app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024
 
 
 AUTH_COOKIE = "screensender_auth"
@@ -333,23 +516,37 @@ def index():
 
 @app.get("/info")
 def info():
-    return jsonify(width=grabber.monitor["width"], height=grabber.monitor["height"],
-                   input=bool(cfg["allow_input"] and IS_WINDOWS))
+    monitors = list_monitors()
+    # Cycle order for the page: each monitor, then all of them together (0) if there are several.
+    order = list(range(1, len(monitors))) + ([0] if len(monitors) > 2 else [])
+    return jsonify(input=bool(cfg["allow_input"] and IS_WINDOWS), monitor=grabber.monitor_index,
+                   monitors=[{"index": i, "width": monitors[i]["width"], "height": monitors[i]["height"]}
+                             for i in order])
 
 
-@app.get("/frame.jpg")
-def frame():
-    # The client asks for the next frame only after it has shown the previous one, so at most
-    # one frame is ever in flight and a slow link never builds up lag (unlike an MJPEG push).
+@app.post("/monitor")
+def set_monitor():
     try:
+        grabber.set_monitor(int((request.get_json(silent=True) or {})["index"]))
+    except (KeyError, TypeError, ValueError):
+        return jsonify(error="bad monitor index"), 400
+    return jsonify(ok=True, monitor=grabber.monitor_index)
+
+
+@app.get("/frame")
+def frame():
+    # The client asks for the next update only after it has drawn the previous one, so at most
+    # one is ever in flight and a slow link never builds up lag (unlike an MJPEG push).
+    try:
+        epoch = int(request.args.get("epoch", 0))
         after = int(request.args.get("after", -1))
     except ValueError:
-        after = -1
-    data, seq = grabber.wait_frame(after)
-    if data is None:
+        epoch, after = 0, -1
+    snap = grabber.wait_frame(epoch, after)
+    if snap is None:
         return Response(status=204)  # screen unchanged; the client simply asks again
-    return Response(data, mimetype="image/jpeg",
-                    headers={"Cache-Control": "no-store", "X-Frame-Seq": str(seq)})
+    return Response(grabber.render_update(snap, epoch, after), mimetype="application/octet-stream",
+                    headers={"Cache-Control": "no-store"})
 
 
 @app.post("/click")
@@ -372,11 +569,12 @@ def click():
 
 
 MAX_TEXT = 2000
+MAX_PASTE = 1_000_000
 
 
 @app.post("/key")
 def key():
-    """Body: {"actions": [{"text": "..."} | {"key": "enter", "mods": ["ctrl"], "repeat": 1}, ...]}"""
+    """Body: {"actions": [{"text": "..."} | {"paste": "..."} | {"key": "enter", "mods": ["ctrl"], "repeat": 1}, ...]}"""
     if not (cfg["allow_input"] and IS_WINDOWS):
         return jsonify(error="input disabled"), 403
     actions = (request.get_json(silent=True) or {}).get("actions")
@@ -389,6 +587,10 @@ def key():
             if not isinstance(a["text"], str) or len(a["text"]) > MAX_TEXT:
                 return jsonify(error="bad text"), 400
             continue
+        if "paste" in a:
+            if not isinstance(a["paste"], str) or len(a["paste"]) > MAX_PASTE:
+                return jsonify(error="bad paste text"), 400
+            continue
         name = str(a.get("key", "")).lower()
         mods = a.get("mods") or []
         repeat = a.get("repeat", 1)
@@ -398,6 +600,14 @@ def key():
     for a in actions:
         if "text" in a:
             keyboard.type_text(a["text"])
+        elif "paste" in a:
+            # Through the clipboard: instant for long texts, and editors do not auto-indent
+            # every line the way they do when the same text is typed.
+            try:
+                clipboard.set_text(a["paste"])
+            except RuntimeError as e:
+                return jsonify(error=str(e)), 503
+            keyboard.press("v", ["ctrl"])
         else:
             keyboard.press(str(a["key"]).lower(), a.get("mods") or [], a.get("repeat", 1))
     return jsonify(ok=True)

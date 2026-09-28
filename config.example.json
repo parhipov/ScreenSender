@@ -8,6 +8,7 @@
   "fps": 5,
   "jpeg_quality": 60,
   "max_width": 1600,
+  "tile_size": 64,
   "draw_cursor": true,
   "allow_input": true
 }
