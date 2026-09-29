@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 # Local settings: password and public IP
 config.json
+# HTTPS certificate made on first start
+cert.pem
+key.pem

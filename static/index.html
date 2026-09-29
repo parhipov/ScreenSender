@@ -2,17 +2,20 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, interactive-widget=resizes-content">
 <title>ScreenSender</title>
 <style>
   html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
-  body { display: flex; flex-direction: column; height: 100dvh; font-family: system-ui, sans-serif; }
-  #screen {
-    flex: 1; min-height: 0; width: 100%;
-    object-fit: contain;
-    touch-action: manipulation;      /* pinch-zoom ok, no double-tap zoom delay */
+  body { display: flex; flex-direction: column; height: 100dvh; font-family: system-ui, sans-serif; touch-action: manipulation; }
+  /* The picture is zoomed and panned by the page itself (CSS transform on #stage), so the
+     toolbar stays put and the server can be told which part of the screen is visible. */
+  #view { flex: 1; min-height: 0; position: relative; overflow: hidden; touch-action: none; }
+  #stage { position: absolute; left: 0; top: 0; width: 100%; height: 100%; transform-origin: 0 0; }
+  #stage canvas {
+    position: absolute; left: 0; top: 0;
     user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
   }
+  #cursor { pointer-events: none; }
   #bar {
     position: fixed; top: 8px; right: 8px; display: flex; gap: 6px; z-index: 2;
     font-size: 14px;
@@ -23,11 +26,13 @@
   }
   #bar button.on { background: rgba(0,120,215,.85); border-color: #3a9be8; }
   #bar.hidden button:not(#toggleBar) { display: none; }
+  #bar.hidden ~ #status { display: none; }
   #status {
     position: fixed; left: 8px; top: 8px; color: #fff; z-index: 2;
-    font-size: 13px; background: rgba(0,0,0,.6);
-    padding: 3px 8px; border-radius: 4px; pointer-events: none;
+    font-size: 13px; background: rgba(0,0,0,.6); font-variant-numeric: tabular-nums;
+    padding: 3px 8px; border-radius: 4px; pointer-events: none; white-space: nowrap;
   }
+  #status.hint { background: rgba(0,120,215,.85); }
   .ripple {
     position: fixed; width: 30px; height: 30px; margin: -15px 0 0 -15px;
     border-radius: 50%; border: 2px solid #fff; pointer-events: none; z-index: 3;
@@ -57,7 +62,12 @@
 </style>
 </head>
 <body>
-<canvas id="screen"></canvas>
+<div id="view">
+  <div id="stage">
+    <canvas id="pic"></canvas>
+    <canvas id="cursor"></canvas>
+  </div>
+</div>
 <div id="kb">
   <input id="kbInput" type="text" placeholder="Печатайте — текст сразу уходит на ПК"
          autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
@@ -91,6 +101,7 @@
 </div>
 <div id="bar">
   <button id="monBtn" style="display:none"></button>
+  <button id="qBtn" title="Качество картинки"></button>
   <button id="clicks" class="on">Клики</button>
   <button id="kbBtn">⌨</button>
   <button id="fs">⛶</button>
@@ -99,32 +110,131 @@
 <div id="status">Подключение…</div>
 
 <script>
-const screen = document.getElementById('screen');
-const ctx = screen.getContext('2d');
+const view = document.getElementById('view');
+const stage = document.getElementById('stage');
+const pic = document.getElementById('pic');
+const cursorLayer = document.getElementById('cursor');
+const ctx = pic.getContext('2d');
+const cctx = cursorLayer.getContext('2d');
 const statusEl = document.getElementById('status');
 const clicksBtn = document.getElementById('clicks');
 const kbBtn = document.getElementById('kbBtn');
 let clicksOn = true;
 let inputAllowed = false;
+let captureName = '';
 
-function setStatus(text) {
-  statusEl.textContent = text;
-  statusEl.style.display = text ? '' : 'none';
-}
-// A message that survives the next frames for a few seconds (setStatus('') clears on every frame).
+// ---- status line: a hint for a few seconds, otherwise the traffic counters
 let hintUntil = 0;
 function hint(text) {
-  setStatus(text);
+  statusEl.textContent = text;
+  statusEl.classList.add('hint');
   hintUntil = Date.now() + 3000;
+}
+const STATS_WINDOW = 3000;
+const stats = [];   // [time, bytes] of recent updates
+function countUpdate(bytes) {
+  stats.push([Date.now(), bytes]);
+}
+function showStats() {
+  if (Date.now() < hintUntil) return;
+  const now = Date.now();
+  while (stats.length && stats[0][0] < now - STATS_WINDOW) stats.shift();
+  const secs = STATS_WINDOW / 1000;
+  const fps = (stats.length / secs).toFixed(1);
+  const kbs = Math.round(stats.reduce((s, [, b]) => s + b, 0) / secs / 1024);
+  statusEl.classList.remove('hint');
+  statusEl.textContent = `${captureName} ${fps} к/с · ${kbs} КБ/с`;
+}
+setInterval(showStats, 1000);
+
+// ---- quality preset (sent with every request; the server picks the compression)
+const QUALITY_LABELS = { low: 'Эконом', normal: 'Обычно', high: 'Чётко' };
+const QUALITY_ORDER = ['low', 'normal', 'high'];
+const qBtn = document.getElementById('qBtn');
+let quality = 'normal';
+try { if (QUALITY_LABELS[localStorage.getItem('quality')]) quality = localStorage.getItem('quality'); } catch {}
+function showQuality() { qBtn.textContent = '🎚 ' + QUALITY_LABELS[quality]; }
+showQuality();
+qBtn.onclick = () => {
+  quality = QUALITY_ORDER[(QUALITY_ORDER.indexOf(quality) + 1) % QUALITY_ORDER.length];
+  showQuality();
+  try { localStorage.setItem('quality', quality); } catch {}
+};
+
+// ---- zoom and pan: the stage (both canvases) is moved with a CSS transform.
+// fit: where the picture sits inside the stage at zoom 1 (letterboxed), in CSS pixels.
+const MAX_ZOOM = 8;
+let fit = { w: 0, h: 0, ox: 0, oy: 0 };
+let zoom = 1, tx = 0, ty = 0;
+let haveFrame = false;
+
+function layout() {
+  const vw = view.clientWidth, vh = view.clientHeight;
+  if (!haveFrame || !vw || !vh) return;
+  const s = Math.min(vw / pic.width, vh / pic.height);
+  fit = { w: pic.width * s, h: pic.height * s, ox: (vw - pic.width * s) / 2, oy: (vh - pic.height * s) / 2 };
+  for (const c of [pic, cursorLayer]) {
+    c.style.left = fit.ox + 'px';
+    c.style.top = fit.oy + 'px';
+    c.style.width = fit.w + 'px';
+    c.style.height = fit.h + 'px';
+  }
+  applyTransform();
+}
+function clampOffset(t, size, offset, viewSize) {
+  // Keeps the picture covering the view when it is larger than it, centred otherwise.
+  const shown = size * zoom;
+  if (shown <= viewSize) return (viewSize - shown) / 2 - offset * zoom;
+  return Math.min(-offset * zoom, Math.max(viewSize - (offset + size) * zoom, t));
+}
+function applyTransform() {
+  tx = clampOffset(tx, fit.w, fit.ox, view.clientWidth);
+  ty = clampOffset(ty, fit.h, fit.oy, view.clientHeight);
+  stage.style.transform = `translate(${tx}px, ${ty}px) scale(${zoom})`;
+}
+function resetZoom() {
+  zoom = 1; tx = 0; ty = 0;
+  applyTransform();
+}
+new ResizeObserver(layout).observe(view);
+
+// Maps a viewport point to 0..1 coordinates on the picture.
+function toImageCoords(clientX, clientY) {
+  if (!haveFrame) return null;
+  const r = view.getBoundingClientRect();
+  const sx = (clientX - r.left - tx) / zoom, sy = (clientY - r.top - ty) / zoom;
+  const x = (sx - fit.ox) / fit.w, y = (sy - fit.oy) / fit.h;
+  return (x < 0 || x > 1 || y < 0 || y > 1) ? null : { x, y };
+}
+// The visible part of the picture in picture pixels; null when all of it is on screen.
+function visibleRect() {
+  if (!haveFrame || zoom <= 1.01) return null;
+  const vw = view.clientWidth, vh = view.clientHeight;
+  const px = s => (s - fit.ox) / fit.w * pic.width, py = s => (s - fit.oy) / fit.h * pic.height;
+  const x0 = Math.max(0, Math.floor(px(-tx / zoom))), y0 = Math.max(0, Math.floor(py(-ty / zoom)));
+  const x1 = Math.min(pic.width, Math.ceil(px((vw - tx) / zoom)));
+  const y1 = Math.min(pic.height, Math.ceil(py((vh - ty) / zoom)));
+  return [x0, y0, Math.max(0, x1 - x0), Math.max(0, y1 - y0)];
 }
 
 // ---- frames: request the next update only after the previous one has been drawn,
 // so a slow connection lowers the frame rate instead of piling up delay.
-// An update holds only the parts of the screen that changed; they are painted over the canvas.
+// The server remembers what this viewer has, and sends only the tiles it lacks
+// inside the visible area. When the area changes, the waiting request is replaced.
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-let epoch = 0, seq = -1, haveFrame = false;
+const viewerId = Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
+let reqNo = 0, seq = 0, epoch = 0;
+let inflight = null;      // AbortController of the request in flight
+let inflightView = '';    // the view it was made with
 
-function decodeJpeg(blob) {
+function viewChanged() {
+  const v = (visibleRect() || []).join();
+  if (v !== inflightView) inflight?.abort();
+}
+
+function decodeImage(bytes) {
+  const type = bytes[0] === 0xFF ? 'image/jpeg' : 'image/webp';
+  const blob = new Blob([bytes], { type });
   if (window.createImageBitmap) return createImageBitmap(blob);
   return new Promise((resolve, reject) => {
     const im = new Image();
@@ -135,70 +245,75 @@ function decodeJpeg(blob) {
   });
 }
 
-// The PC pointer is drawn by the page: the pixels under it are saved and put back before
-// the next update, so its moves need no picture data.
+// The PC pointer lives on its own transparent canvas, so drawing it never touches the picture.
 const CURSOR_R = 6;
-let cursorPatch = null;
-function hideCursor() {
-  if (cursorPatch) ctx.putImageData(cursorPatch.data, cursorPatch.x, cursorPatch.y);
-  cursorPatch = null;
-}
+let lastCursor = null;
 function drawCursor(pos) {
+  const s = CURSOR_R + 3;
+  if (lastCursor) cctx.clearRect(lastCursor[0] - s, lastCursor[1] - s, 2 * s, 2 * s);
+  lastCursor = pos;
   if (!pos) return;
-  const [cx, cy] = pos, s = CURSOR_R + 2;
-  cursorPatch = { x: cx - s, y: cy - s, data: ctx.getImageData(cx - s, cy - s, 2 * s, 2 * s) };
-  ctx.beginPath();
-  ctx.arc(cx, cy, CURSOR_R - 1, 0, 2 * Math.PI);
-  ctx.fillStyle = '#ff2828';
-  ctx.fill();
-  ctx.lineWidth = 2;
-  ctx.strokeStyle = '#fff';
-  ctx.stroke();
+  cctx.beginPath();
+  cctx.arc(pos[0], pos[1], CURSOR_R - 1, 0, 2 * Math.PI);
+  cctx.fillStyle = '#ff2828';
+  cctx.fill();
+  cctx.lineWidth = 2;
+  cctx.strokeStyle = '#fff';
+  cctx.stroke();
 }
 
-// Update format: 4-byte header length, JSON header, then the JPEG pieces back to back.
+// Update format: 4-byte header length, JSON header, then the picture pieces back to back.
 async function applyUpdate(buf) {
   const headLen = new DataView(buf).getUint32(0);
   const meta = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, headLen)));
   let offset = 4 + headLen;
   const pieces = await Promise.all(meta.rects.map(([x, y, len]) => {
-    const blob = new Blob([new Uint8Array(buf, offset, len)], { type: 'image/jpeg' });
+    const bytes = new Uint8Array(buf, offset, len);
     offset += len;
-    return decodeJpeg(blob).then(bmp => ({ x, y, bmp }));
+    return decodeImage(bytes).then(bmp => ({ x, y, bmp }));
   }));
   // Everything is decoded first and painted in one go, so a frame never shows half-updated.
-  if (meta.epoch !== epoch || screen.width !== meta.width || screen.height !== meta.height) {
-    screen.width = meta.width;   // resizing also clears the canvas
-    screen.height = meta.height;
-    cursorPatch = null;
-  } else {
-    hideCursor();
+  if (meta.epoch !== epoch || pic.width !== meta.width || pic.height !== meta.height) {
+    pic.width = cursorLayer.width = meta.width;   // resizing also clears the canvases
+    pic.height = cursorLayer.height = meta.height;
+    lastCursor = null;
+    epoch = meta.epoch;
+    haveFrame = true;
+    resetZoom();
+    layout();
   }
   for (const p of pieces) {
     ctx.drawImage(p.bmp, p.x, p.y);
     p.bmp.close?.();
   }
   drawCursor(meta.cursor);
-  epoch = meta.epoch;
   seq = meta.seq;
-  haveFrame = true;
+  captureName = meta.capture;
   if (meta.monitor !== monitor) { monitor = meta.monitor; refreshMonitor(); }
 }
 
 async function frameLoop() {
   for (;;) {
     if (document.hidden) { await sleep(500); continue; }   // tab in background: no traffic
+    const params = new URLSearchParams({ v: viewerId, r: ++reqNo, ack: seq, q: quality });
+    const vr = visibleRect();
+    if (vr) params.set('view', vr.join());
+    inflightView = (vr || []).join();
+    inflight = new AbortController();
     try {
-      const r = await fetch(`frame?epoch=${epoch}&after=${seq}`, { cache: 'no-store' });
+      const r = await fetch('frame?' + params, { cache: 'no-store', signal: inflight.signal });
       if (r.status === 401) { location.href = 'login'; return; }  // session expired
       if (r.status === 200) {
-        await applyUpdate(await r.arrayBuffer());
-        if (Date.now() > hintUntil) setStatus('');
+        const buf = await r.arrayBuffer();
+        countUpdate(buf.byteLength);
+        await applyUpdate(buf);
+        showStats();
       } else if (r.status !== 204) {
         throw new Error('HTTP ' + r.status);
       }
-    } catch {
-      setStatus('Нет связи, переподключение…');
+    } catch (e) {
+      if (e.name === 'AbortError') continue;   // the view changed: ask again right away
+      hint('Нет связи, переподключение…');
       await sleep(2000);
     }
   }
@@ -232,6 +347,7 @@ fetch('info').then(r => r.json()).then(info => {
   monitors = info.monitors;
   if (monitor === null) monitor = info.monitor;
   refreshMonitor();
+  captureName = info.capture;
   inputAllowed = info.input;
   if (!inputAllowed) {
     clicksOn = false;
@@ -253,22 +369,17 @@ document.getElementById('fs').onclick = () => {
 document.getElementById('toggleBar').onclick = () =>
   document.getElementById('bar').classList.toggle('hidden');
 
-// ---- tap -> left click, long press -> right click
+// ---- pointer input
+// One finger: tap = left click, long press = right click, drag = pan when zoomed in.
+// Two fingers: pinch = zoom, vertical/horizontal move = mouse wheel on the PC.
 const LONG_PRESS_MS = 550;
 const MOVE_TOLERANCE = 12;
-let press = null;
-let activePointers = 0;
-
-// Maps a viewport point to 0..1 coordinates on the picture, accounting for letterboxing.
-function toImageCoords(clientX, clientY) {
-  if (!haveFrame) return null;
-  const r = screen.getBoundingClientRect();
-  const scale = Math.min(r.width / screen.width, r.height / screen.height);
-  const w = screen.width * scale, h = screen.height * scale;
-  const x = (clientX - r.left - (r.width - w) / 2) / w;
-  const y = (clientY - r.top - (r.height - h) / 2) / h;
-  return (x < 0 || x > 1 || y < 0 || y > 1) ? null : { x, y };
-}
+const SCROLL_STEP = 28;      // finger travel in CSS pixels per wheel notch
+const pointers = new Map();  // pointerId -> {x, y}
+let press = null;            // pending tap: {x, y, timer}
+let pan = null;              // last position of the single finger
+let gesture = null;          // two-finger gesture state
+let panTimer = null;
 
 function ripple(clientX, clientY, right) {
   const d = document.createElement('div');
@@ -290,48 +401,158 @@ function sendClick(clientX, clientY, button) {
   }).catch(() => hint('Клик не отправлен'));
 }
 
+// One scroll request at a time. Notches arriving meanwhile are merged into the next one,
+// but only a few: on a slow link the rest is dropped rather than delivered as a jump later.
+const SCROLL_PENDING_MAX = 6;
+const scrollAcc = { p: null, dy: 0, dx: 0 };
+let scrollBusy = false;
+function sendScroll(p, dy, dx) {
+  const cap = n => Math.max(-SCROLL_PENDING_MAX, Math.min(SCROLL_PENDING_MAX, n));
+  scrollAcc.p = p;
+  scrollAcc.dy = cap(scrollAcc.dy + dy);
+  scrollAcc.dx = cap(scrollAcc.dx + dx);
+  flushScroll();
+}
+async function flushScroll() {
+  if (scrollBusy || !scrollAcc.p || (!scrollAcc.dy && !scrollAcc.dx)) return;
+  scrollBusy = true;
+  const body = { x: scrollAcc.p.x, y: scrollAcc.p.y,
+                 dy: Math.max(-50, Math.min(50, scrollAcc.dy)), dx: Math.max(-50, Math.min(50, scrollAcc.dx)) };
+  scrollAcc.dy = scrollAcc.dx = 0;
+  try {
+    const r = await fetch('scroll', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) hint('Прокрутка не отправлена');
+  } catch {
+    hint('Прокрутка не отправлена');
+  }
+  scrollBusy = false;
+  flushScroll();
+}
+
 function cancelPress() {
   if (press) clearTimeout(press.timer);
   press = null;
 }
+const mid = (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
 
-screen.addEventListener('pointerdown', e => {
-  activePointers++;
-  if (!clicksOn || !inputAllowed) return;
-  if (activePointers > 1) { cancelPress(); return; }   // pinch: no clicks
+view.addEventListener('pointerdown', e => {
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  try { view.setPointerCapture(e.pointerId); } catch {}
+  if (pointers.size === 2) {
+    cancelPress();
+    pan = null;
+    const [a, b] = [...pointers.values()];
+    const m = mid(a, b);
+    gesture = { dist0: Math.hypot(a.x - b.x, a.y - b.y), mid0: m, lastMid: m, zoom0: zoom, tx0: tx, ty0: ty,
+                mode: null, accY: 0, accX: 0, at: toImageCoords(m.x, m.y) };
+    return;
+  }
+  if (pointers.size > 2) { gesture = null; return; }
   if (e.pointerType === 'mouse' && e.button !== 0) return;
-  const x = e.clientX, y = e.clientY;
-  press = {
-    x, y,
-    timer: setTimeout(() => { sendClick(x, y, 'right'); press = null; }, LONG_PRESS_MS),
-  };
-});
-screen.addEventListener('pointermove', e => {
-  if (press && Math.hypot(e.clientX - press.x, e.clientY - press.y) > MOVE_TOLERANCE) cancelPress();
-});
-screen.addEventListener('pointerup', e => {
-  activePointers = Math.max(0, activePointers - 1);
-  if (!press) return;
-  const { x, y } = press;
-  cancelPress();
-  sendClick(x, y, 'left');
-});
-screen.addEventListener('pointercancel', () => {
-  activePointers = Math.max(0, activePointers - 1);
-  cancelPress();
-});
-screen.addEventListener('contextmenu', e => {
-  e.preventDefault();
-  // Desktop browser: real right button goes straight through.
-  if (clicksOn && inputAllowed && e.pointerType !== 'touch' && !('ontouchstart' in window)) {
-    sendClick(e.clientX, e.clientY, 'right');
+  pan = { x: e.clientX, y: e.clientY };
+  if (clicksOn && inputAllowed) {
+    const x = e.clientX, y = e.clientY;
+    press = { x, y, timer: setTimeout(() => { sendClick(x, y, 'right'); press = null; }, LONG_PRESS_MS) };
   }
 });
-screen.addEventListener('dragstart', e => e.preventDefault());
+
+function handleGesture() {
+  const g = gesture;
+  const [a, b] = [...pointers.values()];
+  const dist = Math.hypot(a.x - b.x, a.y - b.y), m = mid(a, b);
+  if (!g.mode) {
+    if (Math.abs(dist - g.dist0) > 25) g.mode = 'zoom';
+    else if (Math.hypot(m.x - g.mid0.x, m.y - g.mid0.y) > 15) g.mode = 'scroll';
+    else return;
+  }
+  if (g.mode === 'zoom') {
+    const r = view.getBoundingClientRect();
+    const z = Math.min(MAX_ZOOM, Math.max(1, g.zoom0 * dist / g.dist0));
+    // The point that was under the fingers at the start stays under them.
+    const sx = (g.mid0.x - r.left - g.tx0) / g.zoom0, sy = (g.mid0.y - r.top - g.ty0) / g.zoom0;
+    zoom = z;
+    tx = m.x - r.left - sx * z;
+    ty = m.y - r.top - sy * z;
+    applyTransform();
+  } else {
+    // Content follows the fingers: moving them down scrolls the PC window up.
+    g.accY += m.y - g.lastMid.y;
+    g.accX += m.x - g.lastMid.x;
+    g.lastMid = m;
+    const ny = Math.trunc(g.accY / SCROLL_STEP), nx = Math.trunc(g.accX / SCROLL_STEP);
+    if ((ny || nx) && g.at && clicksOn && inputAllowed) {
+      g.accY -= ny * SCROLL_STEP;
+      g.accX -= nx * SCROLL_STEP;
+      sendScroll(g.at, ny, -nx);
+    }
+  }
+}
+function endGesture() {
+  gesture = null;
+  if (zoom < 1.05) zoom = 1;
+  applyTransform();
+  viewChanged();
+}
+
+view.addEventListener('pointermove', e => {
+  const p = pointers.get(e.pointerId);
+  if (!p) return;
+  p.x = e.clientX;
+  p.y = e.clientY;
+  if (gesture) { if (pointers.size === 2) handleGesture(); return; }
+  if (pointers.size !== 1 || !pan) return;
+  const dx = e.clientX - pan.x, dy = e.clientY - pan.y;
+  pan.x = e.clientX;
+  pan.y = e.clientY;
+  if (press && Math.hypot(e.clientX - press.x, e.clientY - press.y) > MOVE_TOLERANCE) cancelPress();
+  if (!press && zoom > 1) {
+    tx += dx;
+    ty += dy;
+    applyTransform();
+    if (!panTimer) panTimer = setTimeout(() => { panTimer = null; viewChanged(); }, 150);
+  }
+});
+view.addEventListener('pointerup', e => {
+  pointers.delete(e.pointerId);
+  if (gesture) { if (pointers.size < 2) endGesture(); return; }
+  if (press) {
+    const { x, y } = press;
+    cancelPress();
+    sendClick(x, y, 'left');
+  }
+  pan = null;
+  viewChanged();
+});
+view.addEventListener('pointercancel', e => {
+  pointers.delete(e.pointerId);
+  cancelPress();
+  pan = null;
+  if (gesture && pointers.size < 2) endGesture();
+});
+view.addEventListener('contextmenu', e => {
+  e.preventDefault();
+  // Desktop browser: real right button goes straight through.
+  if (clicksOn && inputAllowed && !('ontouchstart' in window)) sendClick(e.clientX, e.clientY, 'right');
+});
+view.addEventListener('wheel', e => {
+  e.preventDefault();
+  if (!clicksOn || !inputAllowed) return;
+  const p = toImageCoords(e.clientX, e.clientY);
+  if (!p) return;
+  const unit = e.deltaMode === 0 ? 100 : 1;   // pixels or lines
+  const notches = d => Math.sign(d) * Math.max(1, Math.round(Math.abs(d) / unit));
+  sendScroll(p, e.deltaY ? -notches(e.deltaY) : 0, e.deltaX ? notches(e.deltaX) : 0);
+}, { passive: false });
+view.addEventListener('dragstart', e => e.preventDefault());
 
 // ---- keyboard
 const kb = document.getElementById('kb');
 const kbInput = document.getElementById('kbInput');
+const PASTE_MIN = 100;
 
 // Actions are batched and sent strictly one request at a time, so keystrokes never reorder.
 let keyQueue = [];
@@ -459,7 +680,6 @@ kbInput.addEventListener('keydown', e => {
 });
 
 // ---- paste from the phone: the text is put into the PC clipboard and pasted with Ctrl+V.
-const PASTE_MIN = 100;
 function pasteText(text) {
   if (!inputAllowed || !text) return;
   takeMods();
