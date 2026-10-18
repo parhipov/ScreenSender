@@ -8,6 +8,7 @@ import json
 import logging
 import random
 import socket
+import ssl
 import sys
 import threading
 import time
@@ -20,6 +21,7 @@ import mss
 import numpy as np
 from flask import Flask, Response, jsonify, redirect, request, send_file, send_from_directory
 from PIL import Image
+from werkzeug.serving import WSGIRequestHandler, make_server
 
 MSS = getattr(mss, "MSS", None) or mss.mss  # mss 10 renamed the class
 
@@ -1040,6 +1042,28 @@ def quiet_logs():
     logging.getLogger("comtypes").setLevel(logging.ERROR)
 
 
+class _Handler(WSGIRequestHandler):
+    # A client that connects and then says nothing (port scanners do) gives up its
+    # thread after this long instead of keeping it forever.
+    timeout = 60
+
+
+def serve(host, port, ssl_files):
+    """app.run(), except for HTTPS: werkzeug wraps the listening socket, so the TLS
+    handshake runs inside accept(), on the one thread that accepts everyone. A single
+    port scanner that connects and sends nothing stalls the whole server for good.
+    Here the handshake waits for the connection's first read, in its own thread,
+    under _Handler.timeout."""
+    server = make_server(host, port, app, threaded=True, request_handler=_Handler)
+    if ssl_files:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(*ssl_files)
+        server.socket = context.wrap_socket(server.socket, server_side=True,
+                                            do_handshake_on_connect=False)
+        server.ssl_context = context        # werkzeug reads it for wsgi.url_scheme
+    server.serve_forever()
+
+
 if __name__ == "__main__":
     port = cfg["port"]
     scheme = "https" if cfg["https"] else "http"
@@ -1064,4 +1088,4 @@ if __name__ == "__main__":
     print("Press Ctrl+C to stop")
     quiet_logs()
     grabber.start()
-    app.run(host=cfg["host"], port=port, threaded=True, ssl_context=ssl_context)
+    serve(cfg["host"], port, ssl_context)
