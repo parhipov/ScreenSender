@@ -1,5 +1,8 @@
 __pycache__/
 *.pyc
+.venv/
+# Logs, pid and hold files of an unattended install (deploy/)
+runtime/
 # Local settings: password and public IP
 config.json
 # HTTPS certificate made on first start
