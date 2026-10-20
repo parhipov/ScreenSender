@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, interactive-widget=resizes-content">
@@ -69,7 +69,7 @@
   </div>
 </div>
 <div id="kb">
-  <input id="kbInput" type="text" placeholder="Печатайте — текст сразу уходит на ПК"
+  <input id="kbInput" type="text" placeholder="Type here: the text goes straight to the PC"
          autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
   <div class="keys">
     <button class="mod" data-mod="ctrl">Ctrl</button>
@@ -92,24 +92,48 @@
     <button data-key="pageup">PgUp</button>
     <button data-key="pagedown">PgDn</button>
     <button data-key="tab" data-mods="alt">Alt+Tab</button>
-    <button data-key="c" data-mods="ctrl">Копир.</button>
-    <button id="pastePhone">📋 С телефона</button>
+    <button data-key="c" data-mods="ctrl" data-t="copy">Copy</button>
+    <button id="pastePhone" data-t="fromPhone">📋 From phone</button>
     <button data-key="v" data-mods="ctrl">Ctrl+V</button>
-    <button data-key="z" data-mods="ctrl">Отмена</button>
+    <button data-key="z" data-mods="ctrl" data-t="undo">Undo</button>
     <button data-key="f5">F5</button>
   </div>
 </div>
 <div id="bar">
   <button id="monBtn" style="display:none"></button>
-  <button id="qBtn" title="Качество картинки"></button>
-  <button id="clicks" class="on">Клики</button>
+  <button id="qBtn" title="Picture quality"></button>
+  <button id="clicks" class="on" data-t="clicks">Clicks</button>
   <button id="kbBtn">⌨</button>
   <button id="fs">⛶</button>
   <button id="toggleBar">☰</button>
 </div>
-<div id="status">Подключение…</div>
+<div id="status" data-t="connecting">Connecting…</div>
 
 <script>
+// ---- interface language: Russian when the browser prefers Russian, English otherwise
+const LANG = (navigator.languages?.[0] || navigator.language || '').toLowerCase().startsWith('ru') ? 'ru' : 'en';
+const TEXT = {
+  en: {
+    connecting: 'Connecting…', clicks: 'Clicks', copy: 'Copy', undo: 'Undo', fromPhone: '📋 From phone',
+    typeHere: 'Type here: the text goes straight to the PC', quality: 'Picture quality',
+    low: 'Low', normal: 'Normal', high: 'Sharp', fps: 'fps', kbs: 'KB/s', allMonitors: 'all',
+    noConnection: 'No connection, reconnecting…', monitorFailed: 'Monitor not switched',
+    clickFailed: 'Click not sent', scrollFailed: 'Scroll not sent', keysFailed: 'Keys not sent',
+    pasteHint: 'Long-press the text field → Paste',
+  },
+  ru: {
+    connecting: 'Подключение…', clicks: 'Клики', copy: 'Копир.', undo: 'Отмена', fromPhone: '📋 С телефона',
+    typeHere: 'Печатайте — текст сразу уходит на ПК', quality: 'Качество картинки',
+    low: 'Эконом', normal: 'Обычно', high: 'Чётко', fps: 'к/с', kbs: 'КБ/с', allMonitors: 'все',
+    noConnection: 'Нет связи, переподключение…', monitorFailed: 'Монитор не переключён',
+    clickFailed: 'Клик не отправлен', scrollFailed: 'Прокрутка не отправлена', keysFailed: 'Клавиши не отправлены',
+    pasteHint: 'Удерживайте поле ввода → «Вставить»',
+  },
+};
+const tr = key => TEXT[LANG][key];
+document.documentElement.lang = LANG;
+document.querySelectorAll('[data-t]').forEach(el => { el.textContent = tr(el.dataset.t); });
+
 const view = document.getElementById('view');
 const stage = document.getElementById('stage');
 const pic = document.getElementById('pic');
@@ -143,14 +167,15 @@ function showStats() {
   const fps = (stats.length / secs).toFixed(1);
   const kbs = Math.round(stats.reduce((s, [, b]) => s + b, 0) / secs / 1024);
   statusEl.classList.remove('hint');
-  statusEl.textContent = `${captureName} ${fps} к/с · ${kbs} КБ/с`;
+  statusEl.textContent = `${captureName} ${fps} ${tr('fps')} · ${kbs} ${tr('kbs')}`;
 }
 setInterval(showStats, 1000);
 
 // ---- quality preset (sent with every request; the server picks the compression)
-const QUALITY_LABELS = { low: 'Эконом', normal: 'Обычно', high: 'Чётко' };
+const QUALITY_LABELS = { low: tr('low'), normal: tr('normal'), high: tr('high') };
 const QUALITY_ORDER = ['low', 'normal', 'high'];
 const qBtn = document.getElementById('qBtn');
+qBtn.title = tr('quality');
 let quality = 'normal';
 try { if (QUALITY_LABELS[localStorage.getItem('quality')]) quality = localStorage.getItem('quality'); } catch {}
 function showQuality() { qBtn.textContent = '🎚 ' + QUALITY_LABELS[quality]; }
@@ -223,7 +248,7 @@ function visibleRect() {
 // inside the visible area. When the area changes, the waiting request is replaced.
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const viewerId = Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
-let reqNo = 0, seq = 0, epoch = 0;
+let reqNo = 0, drawnReq = 0, epoch = 0;   // drawnReq: request whose update was drawn last
 let inflight = null;      // AbortController of the request in flight
 let inflightView = '';    // the view it was made with
 
@@ -287,7 +312,7 @@ async function applyUpdate(buf) {
     p.bmp.close?.();
   }
   drawCursor(meta.cursor);
-  seq = meta.seq;
+  drawnReq = meta.req;
   captureName = meta.capture;
   if (meta.monitor !== monitor) { monitor = meta.monitor; refreshMonitor(); }
 }
@@ -295,7 +320,7 @@ async function applyUpdate(buf) {
 async function frameLoop() {
   for (;;) {
     if (document.hidden) { await sleep(500); continue; }   // tab in background: no traffic
-    const params = new URLSearchParams({ v: viewerId, r: ++reqNo, ack: seq, q: quality });
+    const params = new URLSearchParams({ v: viewerId, r: ++reqNo, ack: drawnReq, q: quality });
     const vr = visibleRect();
     if (vr) params.set('view', vr.join());
     inflightView = (vr || []).join();
@@ -313,7 +338,7 @@ async function frameLoop() {
       }
     } catch (e) {
       if (e.name === 'AbortError') continue;   // the view changed: ask again right away
-      hint('Нет связи, переподключение…');
+      hint(tr('noConnection'));
       await sleep(2000);
     }
   }
@@ -323,7 +348,7 @@ async function frameLoop() {
 const monBtn = document.getElementById('monBtn');
 let monitors = [], monitor = null;
 function refreshMonitor() {
-  monBtn.textContent = '🖥 ' + (monitor === 0 ? 'все' : monitor);
+  monBtn.textContent = '🖥 ' + (monitor === 0 ? tr('allMonitors') : monitor);
   monBtn.style.display = monitors.length > 1 ? '' : 'none';
 }
 monBtn.onclick = async () => {
@@ -339,7 +364,7 @@ monBtn.onclick = async () => {
     monitor = (await r.json()).monitor;
     refreshMonitor();
   } catch {
-    hint('Монитор не переключён');
+    hint(tr('monitorFailed'));
   }
 };
 
@@ -398,7 +423,7 @@ function sendClick(clientX, clientY, button) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ x: p.x, y: p.y, button }),
-  }).catch(() => hint('Клик не отправлен'));
+  }).catch(() => hint(tr('clickFailed')));
 }
 
 // One scroll request at a time. Notches arriving meanwhile are merged into the next one,
@@ -425,9 +450,9 @@ async function flushScroll() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
-    if (!r.ok) hint('Прокрутка не отправлена');
+    if (!r.ok) hint(tr('scrollFailed'));
   } catch {
-    hint('Прокрутка не отправлена');
+    hint(tr('scrollFailed'));
   }
   scrollBusy = false;
   flushScroll();
@@ -552,6 +577,7 @@ view.addEventListener('dragstart', e => e.preventDefault());
 // ---- keyboard
 const kb = document.getElementById('kb');
 const kbInput = document.getElementById('kbInput');
+kbInput.placeholder = tr('typeHere');
 const PASTE_MIN = 100;
 
 // Actions are batched and sent strictly one request at a time, so keystrokes never reorder.
@@ -572,9 +598,9 @@ async function flushKeys() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ actions }),
     });
-    if (!r.ok) hint('Клавиши не отправлены');
+    if (!r.ok) hint(tr('keysFailed'));
   } catch {
-    hint('Клавиши не отправлены');
+    hint(tr('keysFailed'));
   }
   keyBusy = false;
   flushKeys();
@@ -700,7 +726,7 @@ pasteBtn.addEventListener('click', async () => {
     try { pasteText(await navigator.clipboard.readText()); return; } catch {}
   }
   kbInput.focus();
-  hint('Удерживайте поле ввода → «Вставить»');
+  hint(tr('pasteHint'));
 });
 
 kbBtn.onclick = () => {

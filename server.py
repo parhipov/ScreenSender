@@ -21,7 +21,7 @@ import mss
 import numpy as np
 from flask import Flask, Response, jsonify, redirect, request, send_file, send_from_directory
 from PIL import Image
-from werkzeug.serving import WSGIRequestHandler, make_server
+from werkzeug.serving import BaseWSGIServer, WSGIRequestHandler, make_server
 
 MSS = getattr(mss, "MSS", None) or mss.mss  # mss 10 renamed the class
 
@@ -55,7 +55,8 @@ DEFAULT_CONFIG = {
 def load_config():
     cfg = dict(DEFAULT_CONFIG)
     if CONFIG_PATH.exists():
-        cfg.update(json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
+        # utf-8-sig: Notepad and PowerShell 5.1 may save the file with a BOM.
+        cfg.update(json.loads(CONFIG_PATH.read_text(encoding="utf-8-sig")))
     else:
         CONFIG_PATH.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
     return cfg
@@ -462,18 +463,22 @@ class Viewer:
     def __init__(self):
         self.lock = threading.Lock()
         self.epoch = 0
-        self.sent = None      # per tile: tile_seq value at the time the tile was last sent
-        self.pending = None   # (seq, tiles, values) of the last response; applied once acknowledged
+        self.sent = None      # per tile: tile_seq value at the time the tile was last sent; -1: send again
+        self.pending = None   # (req, tiles, values) of the last response; applied once acknowledged
         self.seen = 0         # seq of the last frame rendered for this viewer
         self.req = 0          # number of the latest request; older waiting requests give up
         self.last_seen = time.monotonic()
 
-    def ack(self, seq):
-        # The page reports the last update it drew; a response that never arrived is
-        # forgotten, so its tiles are sent again.
-        if self.pending and self.pending[0] == seq:
-            _, tiles, values = self.pending
-            self.sent[tiles] = values
+    def ack(self, req):
+        # The page reports the request whose response it drew last. Any other pending response
+        # never arrived: its tiles are sent again, and so is the frame (the cursor) it carried.
+        # Requests, not frame seqs: the same frame can go out twice when the view moves.
+        if self.pending:
+            if self.pending[0] == req:
+                _, tiles, values = self.pending
+                self.sent[tiles] = values
+            else:
+                self.seen = 0
         self.pending = None
 
     def reset(self, epoch, tiles):
@@ -724,7 +729,7 @@ class Grabber(threading.Thread):
         return (int(cols[0]) * ts, int(rows[0]) * ts,
                 min((int(cols[-1]) + 1) * ts, frame.img.width), min((int(rows[-1]) + 1) * ts, frame.img.height))
 
-    def render_update(self, frame, viewer, view, preset):
+    def render_update(self, frame, viewer, view, preset, req):
         """Binary update: 4-byte header length, JSON header, then the picture pieces back to back."""
         img = frame.img
         if frame.epoch != viewer.epoch:
@@ -732,24 +737,32 @@ class Grabber(threading.Thread):
         mask = self.view_mask(frame, view)
         stale = viewer.stale(frame, mask)
         tiles = np.flatnonzero(stale)
+        values = frame.tile_seq[tiles]
         low, high = QUALITY[preset]
         pieces = []
         if tiles.size > np.count_nonzero(mask) * FULL_FRAME_SHARE:
             tiles = np.flatnonzero(mask)  # the whole visible area goes as one picture
             box = self._tiles_bbox(mask, frame)
             piece = img if box == (0, 0, img.width, img.height) else img.crop(box)
-            crisp = bool(frame.tile_hq[tiles].all())
+            # Sharp when most of what the page lacks is sharp (a new viewer, a big refine);
+            # quick and low while most of it is moving.
+            crisp = np.count_nonzero(stale & frame.tile_hq) >= np.count_nonzero(stale & ~frame.tile_hq)
             pieces.append((box[0], box[1], encode(piece, high if crisp else low, crisp)))
+            values = frame.tile_seq[tiles]
+            if not crisp:
+                # The picture also covered tiles the page had sharp. They go again, sharp, once the
+                # big change is over; until then every such picture would cover them anyway.
+                values = np.where(frame.tile_hq[tiles], -1, values)
         elif tiles.size:
             for part, quality, crisp in ((stale & frame.tile_hq, high, True),
                                          (stale & ~frame.tile_hq, low, False)):
                 if part.any():
                     for r in tile_rects(part, frame.cols, frame.rows, self.tile_size, img.width, img.height):
                         pieces.append((r[0], r[1], encode(img.crop(r), quality, crisp)))
-        viewer.pending = (frame.seq, tiles, frame.tile_seq[tiles].copy())
+        viewer.pending = (req, tiles, values)
         viewer.seen = frame.seq
         header = json.dumps({
-            "epoch": frame.epoch, "seq": frame.seq, "monitor": frame.monitor_index,
+            "epoch": frame.epoch, "req": req, "monitor": frame.monitor_index,
             "width": img.width, "height": img.height, "cursor": frame.cursor,
             "capture": self.backend,
             "rects": [[x, y, len(data)] for x, y, data in pieces],
@@ -789,7 +802,7 @@ def input_enabled():
 def require_auth():
     if request.path in PUBLIC_PATHS:
         return None
-    if hmac.compare_digest(request.cookies.get(AUTH_COOKIE, ""), auth_token()):
+    if hmac.compare_digest(request.cookies.get(AUTH_COOKIE, "").encode(), auth_token().encode()):
         return None
     if request.path == "/":
         return redirect("/login")
@@ -803,8 +816,9 @@ def login_page():
 
 @app.post("/login")
 def login():
-    ok = (hmac.compare_digest(request.form.get("username", ""), cfg["username"])
-          & hmac.compare_digest(request.form.get("password", ""), cfg["password"]))
+    # Compared as bytes: compare_digest rejects str with non-ASCII characters.
+    ok = (hmac.compare_digest(request.form.get("username", "").encode(), cfg["username"].encode())
+          & hmac.compare_digest(request.form.get("password", "").encode(), cfg["password"].encode()))
     if not ok:
         time.sleep(1)  # slows down password guessing
         return redirect("/login?error=1")
@@ -859,7 +873,7 @@ def set_monitor():
 def frame():
     """Next update for one viewer.
 
-    v: viewer id, r: request number, ack: seq of the last update the page drew,
+    v: viewer id, r: request number, ack: r of the last update the page drew,
     view: x,y,w,h of the visible part in picture pixels (omitted = everything), q: quality preset.
     The page asks for the next update only after drawing the previous one, so at most one is
     ever in flight and a slow link lowers the frame rate instead of building up lag.
@@ -889,7 +903,7 @@ def frame():
     with viewer.lock:
         if viewer.req != req:
             return Response(status=204)
-        body = grabber.render_update(snap, viewer, view, preset)
+        body = grabber.render_update(snap, viewer, view, preset, req)
     return Response(body, mimetype="application/octet-stream", headers={"Cache-Control": "no-store"})
 
 
@@ -1054,6 +1068,10 @@ def serve(host, port, ssl_files):
     port scanner that connects and sends nothing stalls the whole server for good.
     Here the handshake waits for the connection's first read, in its own thread,
     under _Handler.timeout."""
+    if IS_WINDOWS:
+        # There SO_REUSEADDR lets a second copy bind the same port without an error, and then
+        # either copy may answer. Without it a restart still rebinds at once.
+        BaseWSGIServer.allow_reuse_address = False
     server = make_server(host, port, app, threaded=True, request_handler=_Handler)
     if ssl_files:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)

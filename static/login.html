@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ScreenSender — вход</title>
+<title>ScreenSender — sign in</title>
 <style>
   * { box-sizing: border-box; }
   body {
@@ -36,30 +36,44 @@
 <body>
 <form method="post" action="login">
   <h1>ScreenSender</h1>
-  <div id="error">Неверный логин или пароль</div>
-  <label>Логин
+  <div id="error" data-t="error">Wrong username or password</div>
+  <label><span data-t="username">Username</span>
     <input name="username" autocomplete="username" autocapitalize="none" autocorrect="off"
            spellcheck="false" required autofocus>
   </label>
-  <label>Пароль
+  <label><span data-t="password">Password</span>
     <span class="pw">
       <input id="password" name="password" type="password" autocomplete="current-password"
              autocapitalize="none" autocorrect="off" spellcheck="false" required>
-      <button id="eye" type="button" aria-label="Показать пароль">👁</button>
+      <button id="eye" type="button" aria-label="Show password">👁</button>
     </span>
   </label>
-  <button type="submit">Войти</button>
+  <button type="submit" data-t="signIn">Sign in</button>
 </form>
 <script>
+  // Russian when the browser prefers Russian, English otherwise.
+  const LANG = (navigator.languages?.[0] || navigator.language || '').toLowerCase().startsWith('ru') ? 'ru' : 'en';
+  const TEXT = {
+    en: { title: 'ScreenSender — sign in', error: 'Wrong username or password', username: 'Username',
+          password: 'Password', signIn: 'Sign in', show: 'Show password', hide: 'Hide password' },
+    ru: { title: 'ScreenSender — вход', error: 'Неверный логин или пароль', username: 'Логин',
+          password: 'Пароль', signIn: 'Войти', show: 'Показать пароль', hide: 'Скрыть пароль' },
+  };
+  const tr = key => TEXT[LANG][key];
+  document.documentElement.lang = LANG;
+  document.title = tr('title');
+  document.querySelectorAll('[data-t]').forEach(el => { el.textContent = tr(el.dataset.t); });
+
   if (new URLSearchParams(location.search).has('error'))
     document.getElementById('error').style.display = 'block';
   const pw = document.getElementById('password');
   const eye = document.getElementById('eye');
+  eye.setAttribute('aria-label', tr('show'));
   eye.onclick = () => {
     const show = pw.type === 'password';
     pw.type = show ? 'text' : 'password';
     eye.classList.toggle('on', show);
-    eye.setAttribute('aria-label', show ? 'Скрыть пароль' : 'Показать пароль');
+    eye.setAttribute('aria-label', tr(show ? 'hide' : 'show'));
     pw.focus();
   };
 </script>
