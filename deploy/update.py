@@ -3,45 +3,35 @@
 Normally started through the "ScreenSender update" scheduled task:  schtasks /Run /TN "ScreenSender update"
 It can also be run from an elevated shell:  .venv\\Scripts\\python.exe deploy\\update.py
 
-Pulls the upstream branch, restarts the server through the supervisor and checks that it answers.
-If it does not, the previous commit is restored and started again. The log is runtime/update.log;
-its last line is "RESULT <code>: <text>" with code
+Pulls the upstream branch, restarts the server through the supervisor, and checks the new version:
+it must answer, keep answering, and let the check in common.smoke_test log in and use the page's
+endpoints. If it fails, the previous commit is restored and started again. The log is
+runtime/update.log; its last line is "RESULT <code>: <text>" with code
     0  updated, or already up to date
     1  refused, nothing was changed (local changes, no supervisor, not elevated, ...)
     2  the new version failed and the previous one is running again
-    3  the server does not answer even after the rollback
+    3  the server does not work even after the rollback
 """
 
 import ctypes
-import json
 import os
-import ssl
 import subprocess
 import sys
 import time
-import urllib.request
-from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-RUNTIME = ROOT / "runtime"
+from common import HOLD, ROOT, RUNTIME, VENV_PYTHON, alive, base_url, kill_server, server_pid, smoke_test, status
+
 LOG = RUNTIME / "update.log"
-PID_FILE = RUNTIME / "server.pid"
-HOLD = RUNTIME / "hold"
-VENV_PYTHON = ROOT / ".venv" / "Scripts" / "python.exe"
 
 START_TIMEOUT = 60   # for the new server to answer
 STAY_UP = 10         # and then to keep answering
 CRASH_STARTS = 3     # this many starts without an answer: it exits at start, roll back at once
-PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 SYNCHRONIZE = 0x00100000
-STILL_ACTIVE = 259
 ERROR_ALREADY_EXISTS = 183
 
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-kernel32.OpenProcess.restype = ctypes.c_void_p
 kernel32.OpenMutexW.restype = ctypes.c_void_p
 kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
-kernel32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
 
 
 class Refused(Exception):
@@ -68,24 +58,6 @@ def git(*args):
     return run("git", *args)
 
 
-def alive(pid):
-    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-    if not handle:
-        return False
-    try:
-        code = ctypes.c_ulong()
-        return bool(kernel32.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == STILL_ACTIVE
-    finally:
-        kernel32.CloseHandle(handle)
-
-
-def server_pid():
-    try:
-        return int(PID_FILE.read_text())
-    except (OSError, ValueError):
-        return None
-
-
 def supervisor_running():
     handle = kernel32.OpenMutexW(SYNCHRONIZE, False, "Local\\ScreenSenderSupervisor")
     if handle:
@@ -93,38 +65,15 @@ def supervisor_running():
     return bool(handle)
 
 
-def stop_server():
-    pid = server_pid()
-    if pid is None or not alive(pid):
-        return True
-    subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True,
-                   creationflags=subprocess.CREATE_NO_WINDOW)
-    for _ in range(20):
-        if not alive(pid):
-            return True
-        time.sleep(0.5)
-    return False
-
-
-def login_url():
-    path = ROOT / "config.json"
-    cfg = json.loads(path.read_text(encoding="utf-8-sig")) if path.exists() else {}
-    host = cfg.get("host", "0.0.0.0")
-    host = "127.0.0.1" if host in ("", "0.0.0.0", "::") else host
-    scheme = "https" if cfg.get("https") else "http"
-    return f"{scheme}://{host}:{cfg.get('port', 8005)}/login"
-
-
 def answers():
     try:
-        with urllib.request.urlopen(login_url(), timeout=5, context=ssl._create_unverified_context()) as r:
-            return r.status == 200
-    except Exception:  # noqa: BLE001 - any failure means "not answering"
+        return status(base_url() + "/login", timeout=5) == 200
+    except Exception:  # noqa: BLE001 - a broken config.json: not answering as far as we can tell
         return False
 
 
 def healthy(old_pid):
-    """A server started after old_pid answers, and still answers a little later."""
+    """A server started after old_pid answers, keeps answering, and passes the smoke test."""
     deadline = time.monotonic() + START_TIMEOUT
     starts = set()
     while time.monotonic() < deadline:
@@ -134,7 +83,11 @@ def healthy(old_pid):
             if alive(pid) and answers():
                 time.sleep(STAY_UP)
                 if server_pid() == pid and alive(pid) and answers():
-                    return True
+                    problem = smoke_test()
+                    if problem is None:
+                        return True
+                    log(f"the check failed: {problem}")
+                    return False
             elif len(starts) >= CRASH_STARTS:
                 return False
         time.sleep(1)
@@ -149,7 +102,7 @@ def switch(commit, requirements_changed):
     before = server_pid()
     HOLD.touch()
     try:
-        if not stop_server():
+        if not kill_server(before):
             raise Refused("could not stop the server; run this elevated or through the scheduled task")
         git("reset", "--hard", "--quiet", commit)
         if requirements_changed:
@@ -188,13 +141,13 @@ def update():
         before = None
     else:
         if healthy(before):
-            if "deploy/supervisor.py" in changed:
-                log("note: deploy/supervisor.py changed; the running supervisor is the old one "
-                    "until the next sign-in or until deploy/install.ps1 is run again")
+            if any(name in changed for name in ("deploy/supervisor.py", "deploy/common.py")):
+                log("note: the supervisor changed; the running one is the old one until the next "
+                    "sign-in or until deploy/install.ps1 is run again")
             if "deploy/install.ps1" in changed:
                 log("note: deploy/install.ps1 changed; run it again to apply the changes")
             return 0, f"updated to {new[:7]}"
-        log("the new version does not answer; rolling back")
+        log("the new version does not work; rolling back")
 
     try:
         before = switch(old, requirements_changed)
@@ -202,7 +155,7 @@ def update():
         return 3, f"the rollback failed ({e}); the server may be down"
     if healthy(before):
         return 2, f"the new version failed; {old[:7]} is running again"
-    return 3, "the server does not answer even after the rollback; see runtime/server.log"
+    return 3, "the previous version does not work either; see runtime/server.log"
 
 
 def main():
