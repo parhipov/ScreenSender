@@ -15,9 +15,11 @@ only the parts of the screen that changed are sent, so a still screen costs no t
   only the visible part is sent. Typing in a document costs a few KB.
 - **Fast capture.** DXGI Desktop Duplication grabs a 4K frame in about 5 ms and reports when nothing
   has changed. GDI is the fallback.
-- **Touch control.** Tap, double tap, long press for a right click, pinch to zoom, two-finger scroll.
+- **Touch control.** Tap, double tap, hold for a right click, hold and drag to select text or move
+  windows, pinch to zoom, two-finger scroll.
 - **Keyboard panel.** Text typed on the phone goes straight to the PC in any language, whatever
-  keyboard layout the PC has. Sticky Ctrl/Alt/Shift/Win, arrows, Esc, Tab, Alt+Tab and more.
+  keyboard layout the PC has. Sticky Ctrl/Alt/Shift/Win, arrows, Esc, Tab, Alt+Tab, Task Manager
+  and more.
 - **Paste from the phone.** Long texts and code arrive instantly through the PC clipboard,
   without editors' auto-indent.
 - **Multiple monitors.** Switch between monitors, or show all of them together.
@@ -77,12 +79,13 @@ or the phone will not reach the PC.
 |---|---|
 | Tap | Left click |
 | Double tap | Double click |
-| Long press | Right click |
+| Hold, then let go | Right click |
+| Hold, then drag | Drag with the left button: select text, move windows, drag files |
 | Pinch | Zoom the picture in; only the visible part is then sent |
 | Drag with one finger (zoomed in) | Look around |
 | Drag with two fingers, up/down or sideways | Mouse wheel |
 
-In a desktop browser, the mouse buttons and the wheel work as usual.
+In a desktop browser, the mouse works as usual, dragging included.
 
 ### Toolbar
 
@@ -109,8 +112,12 @@ The **⌨** panel has a text field and two rows of keys.
 - **Ctrl, Alt, Shift, Win are sticky.** Tap Ctrl, then a letter, to get Ctrl+letter.
   This also works with a Russian keyboard layout on the phone: Ctrl+С is sent as Ctrl+C.
   Tap an active modifier again to send it alone; Win alone opens the Start menu.
+  Sticky modifiers also apply to the next tap on the picture: Shift+tap extends a selection,
+  Ctrl+tap adds to it.
 - The other keys: Esc, Tab, Backspace, Del, Enter, arrows, Home, End, PgUp, PgDn, Alt+Tab,
   F5, Copy (Ctrl+C), Undo (Ctrl+Z) and Ctrl+V, which pastes the PC clipboard.
+- The third row: Task Manager, Win+R (Run), Win+D (desktop), Win+E (Explorer), Win+Tab and
+  the Menu key.
 - With the field focused in a desktop browser, a physical keyboard works as well,
   including shortcuts.
 
@@ -172,16 +179,18 @@ Whoever logs in fully controls your PC. Before you open the port to the internet
   certificates for any website, and a phone that trusts this certificate will accept them.
   `key.pem` and `cert.pem` are in `.gitignore`. Remove the certificate from the phone once you stop
   using ScreenSender.
-- A login lasts 30 days. Changing the password logs out every device.
-- The startup output prints the login and the password, so keep that window private.
+- A login lasts 30 days from the last visit. Changing the password, or deleting `secret.key`
+  and restarting the server, logs out every device.
 - Set `"allow_input": false` if you only need to watch the screen.
 
 ## Running unattended
 
 If ScreenSender is your only way into a PC far away, the `deploy/` folder sets it up to survive
-on its own: a supervisor that restarts the server whenever it exits, scheduled tasks that start it
-at sign-in, and an update script that pulls from git, checks that the new version answers and rolls
-back if it does not. [CLAUDE.md](CLAUDE.md) walks through the install, a checklist for leaving
+on its own: a supervisor that restarts the server whenever it exits or stops responding, scheduled
+tasks that start it at sign-in, and an update script that pulls from git, checks that the new
+version works and rolls back if it does not. The server then runs as administrator, so it can
+control elevated windows; `install.ps1 -AdminShell` also adds an elevated shell that opens without
+a UAC prompt, which is otherwise impossible to answer remotely. [CLAUDE.md](CLAUDE.md) walks through the install, a checklist for leaving
 the PC alone (automatic sign-in, no sleep, no lock, power cuts) and updates. It is written for
 Claude Code, but people can follow it too.
 
@@ -189,7 +198,10 @@ Claude Code, but people can follow it too.
 
 - DXGI capture cannot see the lock screen or UAC prompts. When it fails, GDI is used for
   the next 30 seconds and DXGI is then tried again.
-- UAC prompts and the lock screen accept input only when the server runs as administrator.
+- The lock screen and UAC prompts on the secure desktop can be neither seen nor controlled through
+  ScreenSender. If it is your only way in, make sure the PC never locks; see Running unattended.
+- Windows of programs running as administrator accept input only when the server runs as
+  administrator too.
 - All viewers share one picture: switching the monitor switches it for everyone.
 - Text is typed as Unicode characters. Some programs that read raw key codes, such as games,
   may ignore it.
@@ -223,3 +235,5 @@ Claude Code, but people can follow it too.
 | `static/index.html` | The viewer page: drawing, zoom, gestures, keyboard panel. |
 | `static/login.html` | The login page. |
 | `config.example.json` | Example settings to copy to `config.json`. |
+| `deploy/` | Supervisor, update with rollback and the install script for unattended use. |
+| `CLAUDE.md` | How to install, leave and update an unattended PC, written for Claude Code. |
