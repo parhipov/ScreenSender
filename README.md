@@ -1,73 +1,225 @@
 # ScreenSender
 
-Shows the Windows desktop in a phone browser and lets you click, scroll and type on it from the phone.
-Works over the LAN or from the internet through a forwarded port.
+**English** | [Русский](README.ru.md)
 
-## Run
+Control your Windows PC from a phone browser. ScreenSender shows the desktop on a web page,
+and you click, scroll and type on it from the phone. It works over the LAN or over the internet
+through a forwarded port. Nothing needs to be installed on the phone.
+
+It is a single Python file plus two HTML pages, and it is built for slow mobile links:
+only the parts of the screen that changed are sent, so a still screen costs no traffic at all.
+
+## Features
+
+- **Low traffic.** The picture is split into tiles and only changed tiles are sent. When you zoom in,
+  only the visible part is sent. Typing in a document costs a few KB.
+- **Fast capture.** DXGI Desktop Duplication grabs a 4K frame in about 5 ms and reports when nothing
+  has changed. GDI is the fallback.
+- **Touch control.** Tap, double tap, long press for a right click, pinch to zoom, two-finger scroll.
+- **Keyboard panel.** Text typed on the phone goes straight to the PC in any language, whatever
+  keyboard layout the PC has. Sticky Ctrl/Alt/Shift/Win, arrows, Esc, Tab, Alt+Tab and more.
+- **Paste from the phone.** Long texts and code arrive instantly through the PC clipboard,
+  without editors' auto-indent.
+- **Multiple monitors.** Switch between monitors, or show all of them together.
+- **Quality presets** for slow and fast links. Once the screen is still, the picture is sent again
+  in high quality, so text is crisp after scrolling.
+- **Login page** and optional **HTTPS** with a self-signed certificate made on first start.
+
+## Requirements
+
+- Windows 10 or 11 on the PC. Mouse and keyboard input use the Windows API; on other systems
+  the page is view-only.
+- Python 3.10 or newer.
+- Any modern phone browser: Chrome, Safari, Firefox.
+
+## Quick start
 
 ```
+git clone https://github.com/parhipov/ScreenSender.git
+cd ScreenSender
 pip install -r requirements.txt
-copy config.example.json config.json   # then edit username / password / public_ip
+copy config.example.json config.json
+```
+
+Open `config.json` and set `username` and `password`, then start the server:
+
+```
 python server.py
 ```
 
-If `config.json` is missing it is created with defaults on first start.
-The startup output lists the LAN and internet URLs and the login.
+If `config.json` is missing, it is created with default values on first start.
+The startup output shows the addresses to open:
+
+```
+Capturing monitor 1: 2560x1440 at (0,0), capture=auto
+  LAN:      http://192.168.1.20:8005/
+  Internet: public_ip is not set in config.json
+  Login:    alice / correct-horse-battery-staple
+Press Ctrl+C to stop
+```
+
+Open the LAN address on a phone that is on the same Wi-Fi and log in with the username and password
+from `config.json`. The browser stays logged in for 30 days.
+On first start, Windows Firewall asks whether Python may accept connections; allow it,
+or the phone will not reach the PC.
+
+### Access from the internet
+
+1. On the router, forward a TCP port (8005 by default) to the PC.
+2. Set `"https": true` and a strong password in `config.json`.
+   See [Security](#security) before you do this.
+3. Optionally set `public_ip` to your external IP. It is only used to print the internet address
+   and to put it into the certificate.
 
 ## Using it
 
-- **Tap**: left click. **Double tap**: double click. **Long press**: right click.
-- **Pinch**: zoom in; then drag with one finger to look around. Only the visible part of the screen
-  is transferred while zoomed in.
-- **Two fingers up/down (or sideways)**: mouse wheel on the PC. A mouse wheel in a desktop browser does the same.
-- **🎚 Эконом / Обычно / Чётко** picks the picture quality (bandwidth); remembered by the browser.
-- **Клики** toggles mouse input (handy while looking around).
-- **🖥 1** switches the monitor (shown only with several monitors): 1, 2, … and then all of them together.
-- **⌨** opens the keyboard panel: text typed on the phone goes straight to the PC (any language),
-  plus Esc / Tab / arrows / Enter / Alt+Tab / copy / Ctrl+V / undo buttons.
-  Ctrl, Alt, Shift and Win are sticky: tap Ctrl, then a letter, to get Ctrl+letter;
-  tap an active modifier again to send it alone (e.g. Win opens Start).
-- **Paste from the phone**: long-press the text field → Paste (or **📋 С телефона**, which reads the
-  clipboard directly over HTTPS). The text is put into the PC clipboard and pasted with Ctrl+V,
-  so long texts and code arrive instantly and without editors' auto-indent. Ctrl+V in a desktop browser does the same.
-- The corner shows the capture method, updates per second and KB/s.
-
-## Config
-
-| key | meaning |
+| On the phone | On the PC |
 |---|---|
-| `host`, `port` | listen address, default `0.0.0.0:8005` |
-| `https` | `true` serves HTTPS with a self-signed certificate (see below) |
-| `public_ip` | your external IP, only used to print the internet URL (and put into the certificate) |
-| `username`, `password` | login for the web page |
-| `monitor` | monitor at start: `1`, `2`, … or `0` = all together; switchable from the page |
-| `capture` | `auto` (default): DXGI desktop duplication, GDI when it is unavailable; `dxgi` or `gdi` to force one |
-| `fps` | capture rate; the phone gets updates no faster than this |
-| `max_width` | the picture is scaled down to this width; lower it for a slow uplink (e.g. `1280`) |
-| `tile_size` | the picture is split into tiles of this size; only changed tiles are sent |
-| `draw_cursor` | draw the PC mouse pointer on the picture |
-| `allow_input` | allow clicks, scrolling and typing from the page |
+| Tap | Left click |
+| Double tap | Double click |
+| Long press | Right click |
+| Pinch | Zoom the picture in; only the visible part is then sent |
+| Drag with one finger (zoomed in) | Look around |
+| Drag with two fingers, up/down or sideways | Mouse wheel |
+
+In a desktop browser, the mouse buttons and the wheel work as usual.
+
+### Toolbar
+
+The toolbar is in the top right corner. The interface is in English, or in Russian when the browser
+prefers Russian.
+
+| Button | What it does |
+|---|---|
+| **🖥 1** | Switches the monitor: 1, 2, …, then all together. Shown only with several monitors. |
+| **🎚 Low / Normal / Sharp** | Picture quality. The browser remembers it. |
+| **Clicks** | Turns mouse input on and off, handy while you look around a zoomed picture. |
+| **⌨** | Opens the keyboard panel. |
+| **⛶** | Fullscreen. |
+| **☰** | Hides the other buttons and the status line. |
+
+The top left corner shows the capture method (DXGI or GDI), updates per second and KB/s.
+
+### Keyboard
+
+The **⌨** panel has a text field and two rows of keys.
+
+- Whatever you type in the field is typed on the PC right away. Autocorrect and word suggestions
+  work too: the page sends only the difference.
+- **Ctrl, Alt, Shift, Win are sticky.** Tap Ctrl, then a letter, to get Ctrl+letter.
+  This also works with a Russian keyboard layout on the phone: Ctrl+С is sent as Ctrl+C.
+  Tap an active modifier again to send it alone; Win alone opens the Start menu.
+- The other keys: Esc, Tab, Backspace, Del, Enter, arrows, Home, End, PgUp, PgDn, Alt+Tab,
+  F5, Copy (Ctrl+C), Undo (Ctrl+Z) and Ctrl+V, which pastes the PC clipboard.
+- With the field focused in a desktop browser, a physical keyboard works as well,
+  including shortcuts.
+
+### Paste from the phone
+
+Long-press the text field and choose **Paste**, or tap **📋 From phone** to read the phone clipboard
+directly (this needs HTTPS). The text is put into the PC clipboard and pasted with Ctrl+V,
+so long texts and code arrive instantly and editors do not auto-indent every line.
+Ctrl+V in a desktop browser does the same. Note that this replaces what was in the PC clipboard.
+
+## Configuration
+
+Settings live in `config.json` next to `server.py`. Restart the server after changing them.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `host` | `"0.0.0.0"` | Listen address. `0.0.0.0` means all network interfaces. |
+| `port` | `8005` | Listen port. |
+| `https` | `false` | Serve HTTPS with a self-signed certificate (see [HTTPS](#https)). |
+| `public_ip` | `""` | Your external IP or host name. Only printed at startup and put into the certificate. |
+| `username`, `password` | `"admin"`, `"change-me"` | Login for the web page. Changing them logs everyone out. |
+| `monitor` | `1` | Monitor shown at start: `1`, `2`, …, or `0` for all together. It can be switched from the page. |
+| `capture` | `"auto"` | `auto` or `dxgi`: DXGI Desktop Duplication, falling back to GDI when it is unavailable. `gdi`: GDI only. |
+| `fps` | `10` | Capture rate. The phone gets updates no faster than this. |
+| `max_width` | `1600` | The picture is scaled down to this width. Lower it for a slow uplink (e.g. `1280`); `0` keeps the full resolution. |
+| `tile_size` | `64` | Tile size in pixels (16 at least). Only changed tiles are sent. |
+| `draw_cursor` | `true` | Show the PC mouse pointer on the page. |
+| `allow_input` | `true` | Allow clicks, scrolling and typing. `false` makes the page view-only. |
 
 ## HTTPS
 
-With `"https": true` the server makes `cert.pem` / `key.pem` on first start (valid 800 days, made
-again when expired) and serves HTTPS only. The phone browser then warns about an unknown certificate
-once; tap "proceed" and it is remembered. To get rid of the warning install the certificate on the
-phone as a trusted root: open `https://<pc>:8005/cert`, then Android: Settings → Security → Install
-a certificate → CA certificate; iPhone: install the downloaded profile, then Settings → General →
-About → Certificate Trust Settings → enable full trust.
+With `"https": true` the server makes `cert.pem` and `key.pem` on first start and serves HTTPS only.
+The certificate is valid for 800 days and is made again when it expires. It covers the LAN IP,
+`public_ip`, `127.0.0.1` and `localhost`. If the PC gets a different LAN IP, delete `cert.pem`
+and restart to make a new certificate.
 
-HTTPS also unlocks reading the phone clipboard for **📋 С телефона**. Delete `cert.pem` to make a new
-certificate (e.g. after the LAN IP changed).
+The phone browser warns about the unknown certificate once; choose "proceed" and it is remembered.
+To get rid of the warning, install the certificate on the phone as a trusted root.
+Open `https://<pc>:8005/cert`, then:
 
-## Notes
+- **Android:** Settings → Security → Encryption & credentials → Install a certificate → CA certificate.
+  The exact path differs between vendors.
+- **iPhone:** install the downloaded profile in Settings → General → VPN & Device Management,
+  then turn on full trust in Settings → General → About → Certificate Trust Settings.
 
-- Only the changed parts of the screen travel: a still screen costs nothing, typing costs a few KB.
-  Small pieces go as WebP, big changes as one JPEG. Once the screen is still for a moment the
-  changed parts are sent again in high quality, so text is crisp after scrolling.
-- DXGI capture (`dxcam`) takes a 4K frame in about 5 ms and knows when nothing changed. It cannot
-  see the lock screen or UAC prompts; GDI is used for half a minute after such a failure.
-- Mouse and keyboard input use the Windows API; on other systems the page is view-only.
-- Plain HTTP sends the password and the picture unencrypted; turn on `https` or put a reverse proxy
-  (e.g. Caddy) in front if you use it over the internet.
+HTTPS is also needed for the **📋 From phone** button, because browsers let pages read
+the clipboard only over HTTPS.
+
+## Security
+
+Whoever logs in fully controls your PC. Before you open the port to the internet:
+
+- **Use a long random password.** The server waits a second after a wrong password,
+  but this does not stop guesses made in parallel.
+- **Use HTTPS.** Over plain HTTP the password, the screen and everything you type travel
+  unencrypted. Instead of the built-in HTTPS you can put a reverse proxy with a real certificate
+  (for example, [Caddy](https://caddyserver.com/)) in front of the server.
+- **Keep `key.pem` private.** The certificate is a CA certificate, so whoever has `key.pem` can make
+  certificates for any website, and a phone that trusts this certificate will accept them.
+  `key.pem` and `cert.pem` are in `.gitignore`. Remove the certificate from the phone once you stop
+  using ScreenSender.
+- A login lasts 30 days. Changing the password logs out every device.
+- The startup output prints the login and the password, so keep that window private.
+- Set `"allow_input": false` if you only need to watch the screen.
+
+## Running unattended
+
+If ScreenSender is your only way into a PC far away, the `deploy/` folder sets it up to survive
+on its own: a supervisor that restarts the server whenever it exits, scheduled tasks that start it
+at sign-in, and an update script that pulls from git, checks that the new version answers and rolls
+back if it does not. [CLAUDE.md](CLAUDE.md) walks through the install, a checklist for leaving
+the PC alone (automatic sign-in, no sleep, no lock, power cuts) and updates. It is written for
+Claude Code, but people can follow it too.
+
+## Notes and limitations
+
+- DXGI capture cannot see the lock screen or UAC prompts. When it fails, GDI is used for
+  the next 30 seconds and DXGI is then tried again.
 - UAC prompts and the lock screen accept input only when the server runs as administrator.
+- All viewers share one picture: switching the monitor switches it for everyone.
+- Text is typed as Unicode characters. Some programs that read raw key codes, such as games,
+  may ignore it.
+- There is no sound, no file transfer and no copying from the PC to the phone.
+
+## How it works
+
+- **Capture.** One thread grabs the screen at `fps`, scales it to `max_width` and compares it with
+  the previous frame tile by tile. Each tile remembers the frame in which it last changed. Nobody
+  watching means no capturing; the capture device is released after 30 idle seconds.
+- **Per-viewer state.** Every browser tab is a viewer. The server remembers which version of each
+  tile the viewer has drawn, so each request returns only the tiles it lacks, and only inside
+  the area the page shows (plus a one-tile margin).
+- **Long polling.** `GET /frame` waits until there is something new for this viewer, for up to
+  5 seconds. The page asks for the next update only after it has drawn the previous one,
+  so a slow link lowers the frame rate instead of building up lag.
+- **Encoding.** Small changed areas go as WebP. When more than half of the visible area needs
+  updating, it goes as one picture: a JPEG while the screen is moving, which encodes much faster,
+  and sharp otherwise. After 0.7 s without changes, tiles that were sent in low quality are sent
+  again in high quality.
+- **Update format.** A 4-byte big-endian header length, a JSON header (picture size, cursor position,
+  rectangle positions and sizes), then the image pieces back to back.
+- **Input.** Text is sent as Unicode `SendInput` events, keys as virtual-key events, clicks
+  and the wheel through `mouse_event`, pasted text through the Win32 clipboard.
+
+### Files
+
+| File | What it is |
+|---|---|
+| `server.py` | The whole server: capture, tiles, web endpoints, input, HTTPS. |
+| `static/index.html` | The viewer page: drawing, zoom, gestures, keyboard panel. |
+| `static/login.html` | The login page. |
+| `config.example.json` | Example settings to copy to `config.json`. |
