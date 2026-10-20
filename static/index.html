@@ -98,6 +98,14 @@
     <button data-key="z" data-mods="ctrl" data-t="undo">Undo</button>
     <button data-key="f5">F5</button>
   </div>
+  <div class="keys">
+    <button data-key="esc" data-mods="ctrl,shift" data-t="taskManager">Task Manager</button>
+    <button data-key="r" data-mods="win">Win+R</button>
+    <button data-key="d" data-mods="win">Win+D</button>
+    <button data-key="e" data-mods="win">Win+E</button>
+    <button data-key="tab" data-mods="win">Win+Tab</button>
+    <button data-key="apps" data-t="menuKey">Menu</button>
+  </div>
 </div>
 <div id="bar">
   <button id="monBtn" style="display:none"></button>
@@ -120,6 +128,7 @@ const TEXT = {
     noConnection: 'No connection, reconnecting…', monitorFailed: 'Monitor not switched',
     clickFailed: 'Click not sent', scrollFailed: 'Scroll not sent', keysFailed: 'Keys not sent',
     pasteHint: 'Long-press the text field → Paste',
+    taskManager: 'Task Manager', menuKey: 'Menu', dragFailed: 'Drag not sent',
   },
   ru: {
     connecting: 'Подключение…', clicks: 'Клики', copy: 'Копир.', undo: 'Отмена', fromPhone: '📋 С телефона',
@@ -128,6 +137,7 @@ const TEXT = {
     noConnection: 'Нет связи, переподключение…', monitorFailed: 'Монитор не переключён',
     clickFailed: 'Клик не отправлен', scrollFailed: 'Прокрутка не отправлена', keysFailed: 'Клавиши не отправлены',
     pasteHint: 'Удерживайте поле ввода → «Вставить»',
+    taskManager: 'Диспетчер задач', menuKey: 'Меню', dragFailed: 'Перетаскивание не отправлено',
   },
 };
 const tr = key => TEXT[LANG][key];
@@ -223,12 +233,14 @@ function resetZoom() {
 }
 new ResizeObserver(layout).observe(view);
 
-// Maps a viewport point to 0..1 coordinates on the picture.
-function toImageCoords(clientX, clientY) {
+// Maps a viewport point to 0..1 coordinates on the picture: null outside it, or with clamp
+// the nearest point on its edge (a drag may leave the picture).
+function toImageCoords(clientX, clientY, clamp = false) {
   if (!haveFrame) return null;
   const r = view.getBoundingClientRect();
   const sx = (clientX - r.left - tx) / zoom, sy = (clientY - r.top - ty) / zoom;
   const x = (sx - fit.ox) / fit.w, y = (sy - fit.oy) / fit.h;
+  if (clamp) return { x: Math.min(1, Math.max(0, x)), y: Math.min(1, Math.max(0, y)) };
   return (x < 0 || x > 1 || y < 0 || y > 1) ? null : { x, y };
 }
 // The visible part of the picture in picture pixels; null when all of it is on screen.
@@ -368,18 +380,25 @@ monBtn.onclick = async () => {
   }
 };
 
-fetch('info').then(r => r.json()).then(info => {
-  monitors = info.monitors;
-  if (monitor === null) monitor = info.monitor;
-  refreshMonitor();
-  captureName = info.capture;
-  inputAllowed = info.input;
-  if (!inputAllowed) {
-    clicksOn = false;
-    clicksBtn.style.display = 'none';
-    kbBtn.style.display = 'none';
-  }
-}).catch(() => {});
+// Asked again until it arrives: without it taps would silently do nothing.
+function loadInfo() {
+  fetch('info').then(r => {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }).then(info => {
+    monitors = info.monitors;
+    if (monitor === null) monitor = info.monitor;
+    refreshMonitor();
+    captureName = info.capture;
+    inputAllowed = info.input;
+    if (!inputAllowed) {
+      clicksOn = false;
+      clicksBtn.style.display = 'none';
+      kbBtn.style.display = 'none';
+    }
+  }).catch(() => setTimeout(loadInfo, 2000));
+}
+loadInfo();
 frameLoop();
 
 // ---- toolbar
@@ -395,13 +414,16 @@ document.getElementById('toggleBar').onclick = () =>
   document.getElementById('bar').classList.toggle('hidden');
 
 // ---- pointer input
-// One finger: tap = left click, long press = right click, drag = pan when zoomed in.
+// One finger: tap = left click; hold, then move = drag with the left button (select text,
+// move windows); hold and let go = right click; a quick move pans when zoomed in.
+// Mouse in a desktop browser: click, or press and move to drag.
 // Two fingers: pinch = zoom, vertical/horizontal move = mouse wheel on the PC.
-const LONG_PRESS_MS = 550;
+const LONG_PRESS_MS = 500;
 const MOVE_TOLERANCE = 12;
 const SCROLL_STEP = 28;      // finger travel in CSS pixels per wheel notch
 const pointers = new Map();  // pointerId -> {x, y}
-let press = null;            // pending tap: {x, y, timer}
+let press = null;            // pending tap: {x, y, timer, held, mouse}
+let drag = null;             // drag in progress, the PC's left button is down: {x, y, keepAlive}
 let pan = null;              // last position of the single finger
 let gesture = null;          // two-finger gesture state
 let panTimer = null;
@@ -419,10 +441,11 @@ function sendClick(clientX, clientY, button) {
   const p = toImageCoords(clientX, clientY);
   if (!p) return;
   ripple(clientX, clientY, button === 'right');
+  // Sticky modifiers apply to the click too: Shift+tap extends a selection, Ctrl+tap adds to it.
   fetch('click', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ x: p.x, y: p.y, button }),
+    body: JSON.stringify({ x: p.x, y: p.y, button, mods: takeMods() }),
   }).catch(() => hint(tr('clickFailed')));
 }
 
@@ -458,6 +481,53 @@ async function flushScroll() {
   flushScroll();
 }
 
+// Drag steps go out in order, one request at a time; moves made meanwhile are merged into the
+// newest. The server lets the button go by itself when nothing arrives for 10 s, so a drag
+// that is held still repeats its position every few seconds.
+const DRAG_KEEPALIVE_MS = 3000;
+let dragQueue = [];
+let dragBusy = false;
+function queueDrag(kind, clientX, clientY) {
+  const p = toImageCoords(clientX, clientY, true);
+  if (!p) return;
+  const step = { drag: kind, x: p.x, y: p.y };
+  if (kind === 'move' && dragQueue[dragQueue.length - 1]?.drag === 'move') dragQueue[dragQueue.length - 1] = step;
+  else dragQueue.push(step);
+  flushDrag();
+}
+async function flushDrag() {
+  if (dragBusy || !dragQueue.length) return;
+  dragBusy = true;
+  const actions = dragQueue;
+  dragQueue = [];
+  try {
+    const r = await fetch('mouse', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ actions }),
+    });
+    if (!r.ok) hint(tr('dragFailed'));
+  } catch {
+    hint(tr('dragFailed'));
+  }
+  dragBusy = false;
+  flushDrag();
+}
+function startDrag(x, y) {
+  drag = { x, y, keepAlive: setInterval(() => queueDrag('move', drag.x, drag.y), DRAG_KEEPALIVE_MS) };
+  queueDrag('down', x, y);
+}
+function dragTo(x, y) {
+  drag.x = x;
+  drag.y = y;
+  queueDrag('move', x, y);
+}
+function endDrag() {
+  clearInterval(drag.keepAlive);
+  queueDrag('up', drag.x, drag.y);
+  drag = null;
+}
+
 function cancelPress() {
   if (press) clearTimeout(press.timer);
   press = null;
@@ -469,6 +539,7 @@ view.addEventListener('pointerdown', e => {
   try { view.setPointerCapture(e.pointerId); } catch {}
   if (pointers.size === 2) {
     cancelPress();
+    if (drag) endDrag();
     pan = null;
     const [a, b] = [...pointers.values()];
     const m = mid(a, b);
@@ -480,8 +551,15 @@ view.addEventListener('pointerdown', e => {
   if (e.pointerType === 'mouse' && e.button !== 0) return;
   pan = { x: e.clientX, y: e.clientY };
   if (clicksOn && inputAllowed) {
-    const x = e.clientX, y = e.clientY;
-    press = { x, y, timer: setTimeout(() => { sendClick(x, y, 'right'); press = null; }, LONG_PRESS_MS) };
+    const p = press = { x: e.clientX, y: e.clientY, held: false, mouse: e.pointerType === 'mouse' };
+    // Held still on a touch screen: letting go is now a right click, moving starts a drag.
+    if (!p.mouse) {
+      p.timer = setTimeout(() => {
+        p.held = true;
+        ripple(p.x, p.y, true);
+        navigator.vibrate?.(15);
+      }, LONG_PRESS_MS);
+    }
   }
 });
 
@@ -533,7 +611,16 @@ view.addEventListener('pointermove', e => {
   const dx = e.clientX - pan.x, dy = e.clientY - pan.y;
   pan.x = e.clientX;
   pan.y = e.clientY;
-  if (press && Math.hypot(e.clientX - press.x, e.clientY - press.y) > MOVE_TOLERANCE) cancelPress();
+  if (drag) { dragTo(e.clientX, e.clientY); return; }
+  if (press && Math.hypot(e.clientX - press.x, e.clientY - press.y) > MOVE_TOLERANCE) {
+    const { x, y, held, mouse } = press;
+    cancelPress();
+    if ((held || mouse) && toImageCoords(x, y)) {
+      startDrag(x, y);
+      dragTo(e.clientX, e.clientY);
+      return;
+    }
+  }
   if (!press && zoom > 1) {
     tx += dx;
     ty += dy;
@@ -544,10 +631,11 @@ view.addEventListener('pointermove', e => {
 view.addEventListener('pointerup', e => {
   pointers.delete(e.pointerId);
   if (gesture) { if (pointers.size < 2) endGesture(); return; }
-  if (press) {
-    const { x, y } = press;
+  if (drag) endDrag();
+  else if (press) {
+    const { x, y, held } = press;
     cancelPress();
-    sendClick(x, y, 'left');
+    sendClick(x, y, held ? 'right' : 'left');
   }
   pan = null;
   viewChanged();
@@ -555,6 +643,7 @@ view.addEventListener('pointerup', e => {
 view.addEventListener('pointercancel', e => {
   pointers.delete(e.pointerId);
   cancelPress();
+  if (drag) endDrag();
   pan = null;
   if (gesture && pointers.size < 2) endGesture();
 });

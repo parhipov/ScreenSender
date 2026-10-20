@@ -7,6 +7,7 @@ import ipaddress
 import json
 import logging
 import random
+import secrets
 import socket
 import ssl
 import sys
@@ -34,6 +35,7 @@ BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
 CERT_PATH = BASE_DIR / "cert.pem"
 KEY_PATH = BASE_DIR / "key.pem"
+SECRET_PATH = BASE_DIR / "secret.key"
 
 DEFAULT_CONFIG = {
     "host": "0.0.0.0",
@@ -50,6 +52,18 @@ DEFAULT_CONFIG = {
     "draw_cursor": True,
     "allow_input": True,
 }
+
+
+def say(text):
+    try:
+        print(text, flush=True)
+    except OSError:  # a full disk must not take the server down
+        pass
+
+
+def log(text):
+    # Timestamped, so these lines can be matched with the supervisor's and the update's logs.
+    say(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {text}")
 
 
 def load_config():
@@ -102,9 +116,14 @@ class Mouse:
     DOUBLE_TAP_TIME = 0.45
     DOUBLE_TAP_DIST = 25
 
+    # A held button is let go when the page goes quiet, e.g. the connection dropped mid-drag.
+    DRAG_TIMEOUT = 10.0
+
     def __init__(self):
         self._last = (0.0, 0, 0)
         self._lock = threading.Lock()
+        self._held = False
+        self._release_timer = None
 
     def click(self, x, y, button="left"):
         if not IS_WINDOWS:
@@ -135,6 +154,33 @@ class Mouse:
                 user32.mouse_event(MOUSEEVENTF_WHEEL, 0, 0, dy * WHEEL_DELTA, 0)
             if dx:
                 user32.mouse_event(MOUSEEVENTF_HWHEEL, 0, 0, dx * WHEEL_DELTA, 0)
+
+    def drag(self, action, x, y):
+        """Left-button drag: "down" where it starts, "move" while it goes on, "up" where it ends."""
+        with self._lock:
+            self._last = (0.0, 0, 0)
+            user32 = ctypes.windll.user32
+            user32.SetCursorPos(int(x), int(y))
+            if action == "down" and not self._held:
+                user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+                self._held = True
+            elif action == "up" and self._held:
+                user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+                self._held = False
+            if self._release_timer:
+                self._release_timer.cancel()
+                self._release_timer = None
+            if self._held:
+                self._release_timer = threading.Timer(self.DRAG_TIMEOUT, self._release)
+                self._release_timer.daemon = True
+                self._release_timer.start()
+
+    def _release(self):
+        with self._lock:
+            # A move that arrived meanwhile has started a newer timer; then this one is stale.
+            if self._held and threading.current_thread() is self._release_timer:
+                ctypes.windll.user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+                self._held = False
 
 
 # ---------------------------------------------------------------- keyboard
@@ -170,12 +216,12 @@ VK = {
     "backspace": 0x08, "tab": 0x09, "enter": 0x0D, "shift": 0x10, "ctrl": 0x11, "alt": 0x12,
     "esc": 0x1B, "space": 0x20, "pageup": 0x21, "pagedown": 0x22, "end": 0x23, "home": 0x24,
     "left": 0x25, "up": 0x26, "right": 0x27, "down": 0x28, "insert": 0x2D, "delete": 0x2E,
-    "win": 0x5B,
+    "win": 0x5B, "apps": 0x5D,
     **{f"f{i}": 0x6F + i for i in range(1, 13)},
     **{c: ord(c.upper()) for c in "abcdefghijklmnopqrstuvwxyz0123456789"},
 }
 # Without the extended flag these arrive as numpad keys and break when NumLock is on.
-EXTENDED_VK = {0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x2D, 0x2E, 0x5B}
+EXTENDED_VK = {0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x2D, 0x2E, 0x5B, 0x5D}
 MODIFIERS = ("ctrl", "alt", "shift", "win")
 
 
@@ -213,6 +259,12 @@ class Keyboard:
                            self._key_input(scan=unit, flags=KEYEVENTF_UNICODE | KEYEVENTF_KEYUP)]
         with self._lock:
             self._send(events)
+
+    def hold(self, mods, up=False):
+        """Presses (or lets go of) modifiers around a mouse click: Shift+click, Ctrl+click."""
+        vks = [VK[m] for m in MODIFIERS if m in mods]
+        with self._lock:
+            self._send([self._vk_event(vk, up) for vk in (reversed(vks) if up else vks)])
 
     def press(self, key, mods=(), repeat=1):
         vk = VK[key]
@@ -398,6 +450,8 @@ REFINE_DELAY = 0.7
 DXGI_RETRY = 30.0
 # A capture that nobody has looked at this long is released.
 CAPTURE_IDLE = 30.0
+# The capture loop passes several times a second; this long without a pass means it is stuck.
+HEALTH_STALL = 30.0
 LONG_POLL = 5.0
 
 # Quality presets the page can choose from: (normal quality, quality of the crisp refill).
@@ -540,6 +594,7 @@ class Grabber(threading.Thread):
         self._last_request = 0.0
         self._frame = None
         self._cond = threading.Condition()
+        self.heartbeat = time.monotonic()
 
     def set_monitor(self, index):
         monitors = list_monitors()  # re-read: resolution or layout may have changed since start
@@ -553,28 +608,38 @@ class Grabber(threading.Thread):
 
     def run(self):
         while True:
-            if not self._active():
-                if self._capture and time.monotonic() - self._last_request > CAPTURE_IDLE:
-                    self._close_capture()
-                time.sleep(0.2)
-                continue
-            started = time.monotonic()
-            with self._cond:
-                monitor, index = self.monitor, self.monitor_index
+            self.heartbeat = time.monotonic()
             try:
-                buf = self._grab(monitor)
-                if buf is not None:
-                    img = self._to_image(buf)
-                    self._update(img, self._cursor(monitor, img.width / monitor["width"]), monitor, index)
-                elif self._frame is not None and self._frame.monitor is monitor:
-                    img = self._frame.img
-                    self._idle(self._cursor(monitor, img.width / monitor["width"]), monitor, index)
+                self._step()
             except Exception as e:  # noqa: BLE001 - keep the loop alive whatever the screen does
-                print(f"capture error: {e}")
-                self._close_capture()
+                log(f"capture error: {e}")
+                try:
+                    self._close_capture()
+                except Exception:  # noqa: BLE001 - a broken capture object is simply dropped
+                    self._capture = None
                 time.sleep(1)
-                continue
-            time.sleep(max(0.0, self.interval - (time.monotonic() - started)))
+
+    def _step(self):
+        if not self._active():
+            if self._capture and time.monotonic() - self._last_request > CAPTURE_IDLE:
+                self._close_capture()
+            time.sleep(0.2)
+            return
+        started = time.monotonic()
+        with self._cond:
+            monitor, index = self.monitor, self.monitor_index
+        buf = self._grab(monitor)
+        if buf is not None:
+            img = self._to_image(buf)
+            self._update(img, self._cursor(monitor, img.width / monitor["width"]), monitor, index)
+        elif self._frame is not None and self._frame.monitor is monitor:
+            img = self._frame.img
+            self._idle(self._cursor(monitor, img.width / monitor["width"]), monitor, index)
+        time.sleep(max(0.0, self.interval - (time.monotonic() - started)))
+
+    def healthy(self):
+        """The capture thread runs and is not stuck; otherwise every page shows a frozen picture."""
+        return self.is_alive() and time.monotonic() - self.heartbeat < HEALTH_STALL
 
     def _want_dxgi(self):
         return (dxcam is not None and IS_WINDOWS and self.capture_mode != "gdi"
@@ -591,9 +656,9 @@ class Grabber(threading.Thread):
                 return DxgiCapture(monitor)
             except Exception as e:  # noqa: BLE001 - any failure means "not now"
                 self._dxgi_retry_at = time.monotonic() + DXGI_RETRY
-                print(f"DXGI capture unavailable ({e}); using GDI")
+                log(f"DXGI capture unavailable ({e}); using GDI")
         elif self.capture_mode == "dxgi" and dxcam is None:
-            print("capture=dxgi but dxcam is not installed; using GDI")
+            log("capture=dxgi but dxcam is not installed; using GDI")
         return GdiCapture(monitor)
 
     def _grab(self, monitor):
@@ -611,7 +676,7 @@ class Grabber(threading.Thread):
             if not isinstance(cap, DxgiCapture):
                 raise
             self._dxgi_retry_at = time.monotonic() + DXGI_RETRY
-            print(f"DXGI capture failed ({e}); using GDI for the next {DXGI_RETRY:.0f} s")
+            log(f"DXGI capture failed ({e}); using GDI for the next {DXGI_RETRY:.0f} s")
             return None
 
     def _to_image(self, buf):
@@ -785,13 +850,30 @@ app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024
 
 AUTH_COOKIE = "screensender_auth"
 AUTH_COOKIE_AGE = 30 * 24 * 3600
-PUBLIC_PATHS = {"/login", "/cert"}
+PUBLIC_PATHS = {"/login", "/cert", "/health"}
+
+
+def load_secret():
+    # Mixed into the login cookie, so a stolen cookie is no password hash to crack offline.
+    # Deleting the file and restarting the server logs out every device.
+    if not SECRET_PATH.exists() or len(SECRET_PATH.read_bytes()) < 32:
+        SECRET_PATH.write_bytes(secrets.token_bytes(32))
+    return SECRET_PATH.read_bytes()
+
+
+SECRET = load_secret()
 
 
 def auth_token():
-    # Derived from the credentials, so changing the password in config logs everyone out.
-    key = f"{cfg['username']}\0{cfg['password']}".encode()
+    # Changing the password in config logs everyone out as well.
+    key = SECRET + f"{cfg['username']}\0{cfg['password']}".encode()
     return hmac.new(key, b"screensender-auth", "sha256").hexdigest()
+
+
+def set_auth_cookie(resp):
+    resp.set_cookie(AUTH_COOKIE, auth_token(), max_age=AUTH_COOKIE_AGE,
+                    httponly=True, samesite="Lax", secure=bool(cfg["https"]))
+    return resp
 
 
 def input_enabled():
@@ -822,10 +904,7 @@ def login():
     if not ok:
         time.sleep(1)  # slows down password guessing
         return redirect("/login?error=1")
-    resp = redirect("/")
-    resp.set_cookie(AUTH_COOKIE, auth_token(), max_age=AUTH_COOKIE_AGE,
-                    httponly=True, samesite="Lax", secure=bool(cfg["https"]))
-    return resp
+    return set_auth_cookie(redirect("/"))
 
 
 @app.get("/logout")
@@ -844,9 +923,18 @@ def certificate():
                      mimetype="application/x-x509-ca-cert")
 
 
+@app.get("/health")
+def health():
+    """For the supervisor and the update check: 503 when the capture loop has died or hangs."""
+    if grabber.healthy():
+        return jsonify(ok=True)
+    return jsonify(ok=False, error="the capture loop is not running"), 503
+
+
 @app.get("/")
 def index():
-    return send_from_directory(BASE_DIR / "static", "index.html")
+    # Every visit starts the 30 days again, so a PC in regular use never asks for the password.
+    return set_auth_cookie(send_from_directory(BASE_DIR / "static", "index.html"))
 
 
 @app.get("/info")
@@ -926,8 +1014,34 @@ def click():
     except (KeyError, TypeError, ValueError):
         return jsonify(error="x and y in 0..1 are required"), 400
     button = "right" if data.get("button") == "right" else "left"
-    mouse.click(x, y, button)
+    mods = data.get("mods") or []
+    if not isinstance(mods, list) or any(m not in MODIFIERS for m in mods):
+        return jsonify(error="bad mods"), 400
+    keyboard.hold(mods)
+    try:
+        mouse.click(x, y, button)
+    finally:
+        keyboard.hold(mods, up=True)
     return jsonify(ok=True, x=x, y=y, button=button)
+
+
+@app.post("/mouse")
+def mouse_drag():
+    """Body: {"actions": [{"drag": "down" | "move" | "up", "x", "y" (0..1)}, ...]}: a left-button drag."""
+    if not input_enabled():
+        return jsonify(error="input disabled"), 403
+    actions = (request.get_json(silent=True) or {}).get("actions")
+    if not isinstance(actions, list) or len(actions) > 100:
+        return jsonify(error="actions list is required"), 400
+    try:
+        steps = [(a["drag"], *point_from_request(a)) for a in actions]
+    except (KeyError, TypeError, ValueError):
+        return jsonify(error="every action needs drag and x, y in 0..1"), 400
+    if any(action not in ("down", "move", "up") for action, _, _ in steps):
+        return jsonify(error="drag must be down, move or up"), 400
+    for action, x, y in steps:
+        mouse.drag(action, x, y)
+    return jsonify(ok=True)
 
 
 MAX_SCROLL = 50
@@ -1023,7 +1137,7 @@ def ensure_certificate(hosts):
         cert = x509.load_pem_x509_certificate(CERT_PATH.read_bytes())
         if cert.not_valid_after_utc > now + timedelta(days=1):
             return
-        print("The certificate has expired, making a new one")
+        log("The certificate has expired, making a new one")
     names = [x509.DNSName("localhost")]
     for host in hosts:
         try:
@@ -1044,7 +1158,7 @@ def ensure_certificate(hosts):
     KEY_PATH.write_bytes(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
                                            serialization.NoEncryption()))
     CERT_PATH.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
-    print(f"Made a new certificate: {CERT_PATH}")
+    log(f"Made a new certificate: {CERT_PATH}")
 
 
 def quiet_logs():
@@ -1091,19 +1205,20 @@ if __name__ == "__main__":
         ensure_certificate([h for h in (ip, cfg["public_ip"], "127.0.0.1") if h])
         ssl_context = (str(CERT_PATH), str(KEY_PATH))
     mon = grabber.monitor
-    print(f"Capturing monitor {cfg['monitor']}: {mon['width']}x{mon['height']} at ({mon['left']},{mon['top']}), "
+    log(f"Capturing monitor {cfg['monitor']}: {mon['width']}x{mon['height']} at ({mon['left']},{mon['top']}), "
           f"capture={cfg['capture']}" + ("" if dxcam or cfg["capture"] == "gdi" else " (dxcam not installed: GDI)"))
-    print(f"  LAN:      {scheme}://{ip}:{port}/")
+    say(f"  LAN:      {scheme}://{ip}:{port}/")
     if cfg["public_ip"]:
-        print(f"  Internet: {scheme}://{cfg['public_ip']}:{port}/")
+        say(f"  Internet: {scheme}://{cfg['public_ip']}:{port}/")
     else:
-        print("  Internet: public_ip is not set in config.json")
+        say("  Internet: public_ip is not set in config.json")
     if cfg["https"]:
-        print(f"  Certificate for the phone: {scheme}://{ip}:{port}/cert")
+        say(f"  Certificate for the phone: {scheme}://{ip}:{port}/cert")
     if cfg["password"] == DEFAULT_CONFIG["password"]:
-        print("  WARNING: default password in config.json - change it before exposing the port!")
-    print(f"  Login:    {cfg['username']} / {cfg['password']}")
-    print("Press Ctrl+C to stop")
+        say("  WARNING: default password in config.json - change it before exposing the port!")
+    # Not the password: under the supervisor this output goes to runtime/server.log.
+    say(f"  Login:    {cfg['username']} (the password is in config.json)")
+    say("Press Ctrl+C to stop")
     quiet_logs()
     grabber.start()
     serve(cfg["host"], port, ssl_context)

@@ -8,3 +8,5 @@ config.json
 # HTTPS certificate made on first start
 cert.pem
 key.pem
+# Login cookie secret, made on first start
+secret.key
