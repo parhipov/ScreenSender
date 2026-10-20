@@ -237,3 +237,7 @@ Claude Code, but people can follow it too.
 | `config.example.json` | Example settings to copy to `config.json`. |
 | `deploy/` | Supervisor, update with rollback and the install script for unattended use. |
 | `CLAUDE.md` | How to install, leave and update an unattended PC, written for Claude Code. |
+
+## License
+
+[MIT](LICENSE)
