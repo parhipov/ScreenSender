@@ -2,12 +2,82 @@
 
 **English** | [Русский](README.ru.md)
 
-Control your Windows PC from a phone browser. ScreenSender shows the desktop on a web page,
-and you click, scroll and type on it from the phone. It works over the LAN or over the internet
-through a forwarded port. Nothing needs to be installed on the phone.
+Control a Windows PC from a browser. ScreenSender shows the desktop on a web page, and you click,
+scroll and type on it. With the SSH setup in [`ssh/`](ssh/README.md), an AI agent on your laptop
+(Claude Code, Codex) can work on the same PC as well.
 
-It is a single Python file and a web page, and it is built for slow mobile links:
-only the parts of the screen that changed are sent, so a still screen costs no traffic at all.
+<p align="center"><img src="docs/screen-en.jpg" width="560" alt="ScreenSender in a browser: the desktop of a far PC, the toolbar and the keyboard panel"></p>
+
+You don't need ScreenSender for normal remote access to your own computer: use Chrome Remote Desktop,
+or RDP over Tailscale. ScreenSender is for machines where nobody is around, such as test machines:
+the agent installs and fixes things over SSH, and you look at the screen in a browser. I first made
+it to use my own PC while I was on a trip.
+
+It is a single Python file and a web page, built for slow links: only the parts of the screen that
+changed are sent, so a still screen costs no traffic at all.
+
+## Set it up with Claude
+
+The easiest way is to ask Claude. Open Claude Code on the PC you want to reach, and write:
+
+> Install ScreenSender from https://github.com/parhipov/ScreenSender on this PC, so I can use it
+> while I'm away. Follow its CLAUDE.md.
+
+Then, on your laptop:
+
+> Set up SSH access from this laptop to my PC. Follow ssh/CLAUDE.md from
+> https://github.com/parhipov/ScreenSender.
+
+Claude does the install and the checklist before you leave. It asks you only for what a person must
+do: type a password, set up the router. That's all: after this you don't need Claude on the PC.
+To do it by hand, see [Quick start](#quick-start).
+
+## Screen and command line together
+
+The screen is for you, the command line is for the agent. Together they do more than each one alone.
+
+```mermaid
+flowchart LR
+  me["You, in a browser"] -- "screen, clicks, text" --> ss
+  agent["Agent on your laptop<br/>Claude Code, Codex"] -- "SSH: Tailscale, internet or LAN" --> sshd
+  subgraph pc["PC far away"]
+    ss["ScreenSender<br/>HTTPS, port 8005"]
+    sshd["OpenSSH server<br/>keys only"]
+  end
+  sshd -. "fixes" .-> ss
+  ss -. "new keys" .-> sshd
+```
+
+- **Only SSH:** you can't see the screen. Commands run in a separate session; you can't see or click
+  the windows on the desktop.
+- **Only the screen:** the agent on your laptop can't work on the PC. You would have to install it
+  on the PC and log in there.
+- **Both:** you see the desktop, and the agent runs commands on the same PC. If one way in breaks,
+  fix it with the other: the agent restarts a hung ScreenSender over SSH, and a new SSH key can be
+  pasted through the screen.
+
+The agent can also see the screen itself: see [Scripts and AI agents](#scripts-and-ai-agents).
+
+## Compared with other tools
+
+| | Client | Other company's servers | Your agent works on the PC | Lock screen | Open ports |
+|---|---|---|---|---|---|
+| ScreenSender + SSH | browser | no | yes, over SSH | can't see | HTTPS, SSH |
+| Same, over Tailscale | browser + Tailscale app | Tailscale | yes, over SSH | can't see | none |
+| Chrome Remote Desktop | browser | Google | no | can see | none |
+| TeamViewer, AnyDesk | app | yes | no | can see | none |
+| RDP | app | no | no | can sign in | 3389 or VPN |
+
+- **The main minus is open ports.** SSH gives admin access to the PC, and its key on the laptop has
+  no password, so the agent can use it: whoever steals the laptop gets the PC. ScreenSender's port is
+  open too, and only a password protects it. See [Security](#security) and
+  [ssh/README.md](ssh/README.md#security).
+- **Tailscale removes the open ports**, but every client needs the Tailscale app and an account,
+  some networks block it, and the PC's key expires after about six months unless you turn key
+  expiry off. The project supports both routes, and they don't depend on each other.
+- **If the PC locks,** ScreenSender can't see the lock screen, Chrome Remote Desktop can. But the
+  agent can restart the PC over SSH (`shutdown /r /t 0`); with automatic sign-in the screen is back
+  in a couple of minutes.
 
 ## Features
 
@@ -17,7 +87,7 @@ only the parts of the screen that changed are sent, so a still screen costs no t
   has changed. GDI is the fallback.
 - **Touch control.** Tap, double tap, hold for a right click, hold and drag to select text or move
   windows, pinch to zoom, two-finger scroll.
-- **Keyboard panel.** Text typed on the phone goes straight to the PC in any language, whatever
+- **Keyboard panel.** Text typed in the panel goes straight to the PC in any language, whatever
   keyboard layout the PC has. Sticky Ctrl/Alt/Shift/Win, arrows, Esc, Tab, Alt+Tab, Task Manager
   and more.
 - **Paste from the phone.** Long texts and code arrive instantly through the PC clipboard,
@@ -32,7 +102,7 @@ only the parts of the screen that changed are sent, so a still screen costs no t
 - Windows 10 or 11 on the PC. Mouse and keyboard input use the Windows API; on other systems
   the page is view-only.
 - Python 3.10 or newer.
-- Any modern phone browser: Chrome, Safari, Firefox.
+- Any modern browser, on a computer or a phone: Chrome, Edge, Safari, Firefox.
 
 ## Quick start
 
@@ -60,10 +130,10 @@ Capturing monitor 1: 2560x1440 at (0,0), capture=auto
 Press Ctrl+C to stop
 ```
 
-Open the LAN address on a phone that is on the same Wi-Fi and log in with the username and password
-from `config.json`. The browser stays logged in for 30 days.
+Open the LAN address on another device in the same network and log in with the username and
+password from `config.json`. The browser stays logged in for 30 days.
 On first start, Windows Firewall asks whether Python may accept connections; allow it,
-or the phone will not reach the PC.
+or other devices will not reach the PC.
 
 ### Access from the internet
 
@@ -73,8 +143,8 @@ or the phone will not reach the PC.
 3. Optionally set `public_ip` to your external IP. It is only used to print the internet address
    and to put it into the certificate.
 
-With [Tailscale](https://tailscale.com) on the PC and the phone no port forwarding is needed: the
-startup output then shows the PC's Tailscale address as well.
+With [Tailscale](https://tailscale.com) on the PC and on the device you connect from, no port
+forwarding is needed: the startup output then shows the PC's Tailscale address as well.
 
 ## Using it
 
@@ -234,12 +304,14 @@ the screenshots.
   the next 30 seconds and DXGI is then tried again.
 - The lock screen and UAC prompts on the secure desktop can be neither seen nor controlled through
   ScreenSender. If it is your only way in, make sure the PC never locks; see Running unattended.
+  If it locks anyway, a restart over SSH brings the screen back, once automatic sign-in is set up.
 - Windows of programs running as administrator accept input only when the server runs as
   administrator too.
 - All viewers share one picture: switching the monitor switches it for everyone.
 - Text is typed as Unicode characters. Some programs that read raw key codes, such as games,
   may ignore it.
-- There is no sound, no file transfer and no copying from the PC to the phone.
+- There is no sound, no file transfer and no copying text from the PC back to the browser.
+  Over SSH, files go with `scp`.
 
 ## How it works
 
@@ -272,6 +344,7 @@ the screenshots.
 | `deploy/` | Supervisor, update with rollback and the install script for unattended use. |
 | `CLAUDE.md` | How to install, leave and update an unattended PC, written for Claude Code. |
 | `ssh/` | SSH access to the PC for Claude Code, separate from ScreenSender. |
+| `docs/` | Pictures for this README. |
 
 ## License
 
