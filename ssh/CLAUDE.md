@@ -73,9 +73,6 @@ blocks in `~/.ssh/config` like the ones the script writes, and plain `ssh home '
       -Principal (New-ScheduledTaskPrincipal -UserId $me -LogonType Interactive) | Out-Null
   Start-ScheduledTask $task; Start-Sleep 3; Unregister-ScheduledTask $task -Confirm:$false
   ```
-
-  On Windows 11 Calculator, Paint and other inbox apps come from the Store and may have been removed
-  (`Get-AppxPackage -AllUsers -Name Microsoft.Paint`); `notepad.exe` is always there.
 - Keep each call short; start long jobs with `Start-Process` or a scheduled task and poll them.
 - `install-server.ps1` restarts the SSH server. Over SSH, run it only while ScreenSender works.
 
