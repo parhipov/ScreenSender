@@ -115,11 +115,14 @@ if (-not $up) { throw "The SSH server does not accept connections on port $Port.
 $names = @()
 $adminKeys = Join-Path $sshDir 'administrators_authorized_keys'
 if (Test-Path $adminKeys) { $names = @([IO.File]::ReadAllLines($adminKeys) | Where-Object { $_.Trim() } | ForEach-Object { ($_.Trim() -split '\s+')[-1] }) }
-$udp = New-Object Net.Sockets.UdpClient
-try { $udp.Connect('8.8.8.8', 80); $lan = $udp.Client.LocalEndPoint.Address.ToString() } catch { $lan = '<this PC>' } finally { $udp.Close() }
+# The interfaces with the default route: a VPN that takes all traffic uses 0.0.0.0/1 routes instead.
+$lan = @(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+    ForEach-Object { (Get-NetIPAddress -InterfaceIndex $_.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).IPAddress } |
+    Select-Object -Unique)
+if (-not $lan) { $lan = @('<this PC>') }
 Write-Host "SSH server is up on port $Port; key logins only."
 Write-Host "  User:    $env:USERNAME"
-Write-Host "  LAN:     ssh -p $Port $env:USERNAME@$lan"
+foreach ($address in $lan) { Write-Host "  LAN:     ssh -p $Port $env:USERNAME@$address" }
 Write-Host "  Keys:    $(if ($names) { $names -join ', ' } else { 'none yet: add one with -PublicKey' })"
 Write-Host "  Host key: $(& (Join-Path $env:SystemRoot 'System32\OpenSSH\ssh-keygen.exe') -lf (Join-Path $sshDir 'ssh_host_ed25519_key.pub'))"
 

@@ -1114,13 +1114,29 @@ def key():
 
 # ---------------------------------------------------------------- startup
 
-def lan_ip():
+def lan_ips():
+    """This PC's addresses in its local network: those of the interfaces with the default route.
+
+    Asking which address reaches the internet would give a VPN's: one that takes all traffic adds
+    0.0.0.0/1 and 128.0.0.0/1 routes, but the real 0.0.0.0/0 stays on the local network card.
+    """
+    if IS_WINDOWS:
+        try:
+            out = subprocess.run(["route", "print", "-4", "0.0.0.0"], capture_output=True, text=True,
+                                 timeout=5, creationflags=subprocess.CREATE_NO_WINDOW).stdout
+            # Destination, netmask, gateway, interface, metric; numbers, whatever the language.
+            ips = [f[3] for f in (line.split() for line in out.splitlines())
+                   if len(f) == 5 and f[0] == f[1] == "0.0.0.0"]
+            if ips:
+                return list(dict.fromkeys(ips))
+        except Exception:  # noqa: BLE001 - fall back to asking the network stack
+            pass
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.connect(("8.8.8.8", 80))
-            return s.getsockname()[0]
+            return [s.getsockname()[0]]
     except OSError:
-        return "127.0.0.1"
+        return ["127.0.0.1"]
 
 
 TAILSCALE_EXE = r"C:\Program Files\Tailscale\tailscale.exe"
@@ -1220,16 +1236,18 @@ def serve(host, port, ssl_files):
 if __name__ == "__main__":
     port = cfg["port"]
     scheme = "https" if cfg["https"] else "http"
-    ip = lan_ip()
+    lan = lan_ips()
+    ip = lan[0]
     tailnet = tailscale_addresses()
     ssl_context = None
     if cfg["https"]:
-        ensure_certificate([h for h in (ip, cfg["public_ip"], "127.0.0.1", *tailnet) if h])
+        ensure_certificate([h for h in (*lan, cfg["public_ip"], "127.0.0.1", *tailnet) if h])
         ssl_context = (str(CERT_PATH), str(KEY_PATH))
     mon = grabber.monitor
     log(f"Capturing monitor {cfg['monitor']}: {mon['width']}x{mon['height']} at ({mon['left']},{mon['top']}), "
         f"capture={cfg['capture']}" + ("" if dxcam or cfg["capture"] == "gdi" else " (dxcam not installed: GDI)"))
-    say(f"  LAN:      {scheme}://{ip}:{port}/")
+    for host in lan:
+        say(f"  LAN:      {scheme}://{host}:{port}/")
     for host in tailnet:
         say(f"  Tailscale: {scheme}://{host}:{port}/")
     if cfg["public_ip"]:
