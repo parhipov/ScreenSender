@@ -16,22 +16,6 @@ it to use my own PC while I was on a trip.
 It is a single Python file and a web page, built for slow links: only the parts of the screen that
 changed are sent, so a still screen costs no traffic at all.
 
-## Set it up with Claude
-
-The easiest way is to ask Claude. Open Claude Code on the PC you want to reach, and write:
-
-> Install ScreenSender from https://github.com/parhipov/ScreenSender on this PC, so I can use it
-> while I'm away. Follow its CLAUDE.md.
-
-Then, on your laptop:
-
-> Set up SSH access from this laptop to my PC. Follow ssh/CLAUDE.md from
-> https://github.com/parhipov/ScreenSender.
-
-Claude does the install and the checklist before you leave. It asks you only for what a person must
-do: type a password, set up the router. That's all: after this you don't need Claude on the PC.
-To do it by hand, see [Quick start](#quick-start).
-
 ## Screen and command line together
 
 The screen is for you, the command line is for the agent. Together they do more than each one alone.
@@ -57,6 +41,22 @@ flowchart LR
   pasted through the screen.
 
 The agent can also see the screen itself: see [Scripts and AI agents](#scripts-and-ai-agents).
+
+## Set it up with Claude
+
+The easiest way is to ask Claude. Open Claude Code on the PC you want to reach, and write:
+
+> Install ScreenSender from https://github.com/parhipov/ScreenSender on this PC, so I can use it
+> while I'm away. Follow its CLAUDE.md.
+
+Then, on your laptop:
+
+> Set up SSH access from this laptop to my PC. Follow ssh/CLAUDE.md from
+> https://github.com/parhipov/ScreenSender.
+
+Claude does the install and the checklist before you leave. It asks you only for what a person must
+do: type a password, set up the router. That's all: after this you don't need Claude on the PC.
+To do it by hand, see [Quick start](#quick-start).
 
 ## Compared with other tools
 
