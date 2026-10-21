@@ -260,8 +260,9 @@ Whoever logs in fully controls your PC. Before you open the port to the internet
 
 If ScreenSender is your only way into a PC far away, the `deploy/` folder sets it up to survive
 on its own: a supervisor that restarts the server whenever it exits or stops responding, scheduled
-tasks that start it at sign-in, and an update script that pulls from git, checks that the new
-version works and rolls back if it does not. The server then runs as administrator, so it can
+tasks that start it at sign-in, and an update script that you start when you want an update: it
+pulls from git, checks that the new version works and rolls back if it does not. Nothing updates
+by itself. The server then runs as administrator, so it can
 control elevated windows; `install.ps1 -AdminShell` also adds an elevated shell that opens without
 a UAC prompt, which is otherwise impossible to answer remotely. [CLAUDE.md](CLAUDE.md) walks through the install, a checklist for leaving
 the PC alone (automatic sign-in, no sleep, no lock, power cuts) and updates. It is written for
