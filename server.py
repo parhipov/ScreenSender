@@ -597,6 +597,7 @@ class Grabber(threading.Thread):
         self._frame = None
         self._cond = threading.Condition()
         self.heartbeat = time.monotonic()
+        self._fresh_at = 0.0  # self._frame shows the screen as it was at this time (monotonic)
 
     def set_monitor(self, index):
         monitors = list_monitors()  # re-read: resolution or layout may have changed since start
@@ -637,6 +638,11 @@ class Grabber(threading.Thread):
         elif self._frame is not None and self._frame.monitor is monitor:
             img = self._frame.img
             self._idle(self._cursor(monitor, img.width / monitor["width"]), monitor, index)
+        if self._frame is not None and self._frame.monitor is monitor:
+            with self._cond:
+                self._fresh_at = started
+                if self._waiting:
+                    self._cond.notify_all()  # a new viewer may be waiting for exactly this
         time.sleep(max(0.0, self.interval - (time.monotonic() - started)))
 
     def healthy(self):
@@ -770,18 +776,23 @@ class Grabber(threading.Thread):
         mask[max(0, y // ts - 1):(y + h) // ts + 2, max(0, x // ts - 1):(x + w) // ts + 2] = True
         return mask.ravel() if mask.any() else np.ones(n, bool)
 
-    def _news(self, viewer, view):
+    def _news(self, viewer, view, asked):
         frame = self._frame
-        return frame is not None and (frame.epoch != viewer.epoch or frame.seq != viewer.seen
-                                      or viewer.stale(frame, self.view_mask(frame, view)).any())
+        if frame is None:
+            return False
+        if frame.epoch != viewer.epoch:
+            # A whole picture for this viewer: one taken after it asked, not the one kept from
+            # whenever somebody last watched, which may be long out of date.
+            return self._fresh_at >= asked
+        return frame.seq != viewer.seen or viewer.stale(frame, self.view_mask(frame, view)).any()
 
     def wait_frame(self, viewer, req, view, timeout=LONG_POLL):
         """Blocks until the viewer lacks something (or a newer request replaces this one); None on timeout."""
         with self._cond:
             self._waiting += 1
-            self._last_request = time.monotonic()
+            self._last_request = asked = time.monotonic()
             try:
-                ready = self._cond.wait_for(lambda: viewer.req != req or self._news(viewer, view),
+                ready = self._cond.wait_for(lambda: viewer.req != req or self._news(viewer, view, asked),
                                             timeout=timeout)
                 return self._frame if ready else None
             finally:
