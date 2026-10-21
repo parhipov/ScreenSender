@@ -3,8 +3,8 @@
 #     Get-Content job.ps1 -Raw | ssh\remote.ps1           # or on stdin
 #     ssh\remote.ps1 -Name home 'Get-Date'
 # It tries the aliases from setup-client.ps1 (<Name>-ts, <Name>, <Name>-lan), starting with the one
-# that worked last time. The code travels base64-encoded, so quotes need no escaping, and runs in a
-# PowerShell without a profile; the output comes back as UTF-8, so non-English text stays readable.
+# that worked last time. The code travels base64-encoded, so quotes need no escaping, and the output
+# comes back as UTF-8, so non-English text stays readable.
 # The exit code is the remote one; 255 means no route got through.
 
 param(
@@ -19,13 +19,13 @@ $ErrorActionPreference = 'Stop'
 if (-not $Code) { $Code = if ($MyInvocation.ExpectingInput) { @($input) -join "`n" } else { [Console]::In.ReadToEnd() } }
 if (-not $Code.Trim()) { throw 'Give the code to run, as an argument or on stdin.' }
 
-$wrapped = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; `$ProgressPreference = 'SilentlyContinue'`n$Code"
-$encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($wrapped))
+$encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Code))
 if ($encoded.Length -gt 24000) { throw 'The code is too long for one command: copy it as a script with scp and run that.' }
-# sshd runs this in a PowerShell of its own, which does not pass the inner exit code on by itself.
-$remote = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; " +
-          "powershell -NoProfile -NonInteractive -EncodedCommand $encoded; exit `$LASTEXITCODE"
-# That outer PowerShell loads the user's profile; one the execution policy blocks prints this error first.
+# Runs in the PowerShell that sshd starts. Not through powershell -EncodedCommand: Windows PowerShell
+# then sends errors back as CLIXML instead of text.
+$remote = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; `$ProgressPreference = 'SilentlyContinue'; " +
+          "Invoke-Expression ([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('$encoded')))"
+# That PowerShell loads the user's profile; one the execution policy blocks prints this error first.
 $profileNoise = '(?ms)^\. : .*?WindowsPowerShell.*?FullyQualifiedErrorId : UnauthorizedAccess\s*'
 
 $profileDir = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
