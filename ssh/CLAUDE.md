@@ -40,8 +40,10 @@ Do this while the user is at the PC, in an elevated PowerShell in the install fo
    Tailscale address (the server prints it at start).
 2. **SSH server:** `powershell -ExecutionPolicy Bypass -File ssh\install-server.ps1 [-Port 22]`. It
    prints the user name to log in with, a LAN example and the host key. Act on its warnings.
-3. **Router** (for the public route): forward an external port to the PC's SSH port. A port other
-   than 22 outside keeps most scanners away; logins need a key anyway.
+3. **Router** (for the public route): first find the public address and check that it takes
+   incoming connections at all, as in "The public address" in the root [CLAUDE.md](../CLAUDE.md);
+   behind a provider's CGNAT no forwarding helps. Then forward an external port to the PC's SSH
+   port. A port other than 22 outside keeps most scanners away; logins need a key anyway.
 
 ## Set up a client
 

@@ -59,6 +59,29 @@ Do this while the user is at the PC, in an elevated PowerShell.
 7. Set up SSH for Claude, the way in that does not depend on ScreenSender: [ssh/CLAUDE.md](ssh/CLAUDE.md).
 8. Show the user the addresses from `runtime\server.log` and let them log in from the phone.
 
+### The public address
+
+The user should not have to look it up. Find it, and check that it can take incoming connections:
+
+1. `curl.exe -s https://1.1.1.1/cdn-cgi/trace` prints `ip=`: the address the PC goes out with.
+   A VPN on the PC changes that answer. If `route print -4 0.0.0.0` lists 0.0.0.0/1 and
+   128.0.0.0/1 routes, a VPN takes all traffic and `ip=` is its exit. Then ask through the real
+   gateway (the 0.0.0.0/0 route): `route add 1.1.1.1 mask 255.255.255.255 <gateway>`, the same
+   curl, `route delete 1.1.1.1`. Use the IP, not a name: such a VPN usually answers DNS too.
+2. Compare it with the PC's own addresses (`ipconfig`) and the router's WAN address (its status
+   page; most routers also answer UPnP GetExternalIPAddress on the local network).
+   - **The PC itself has it** (a server in a data centre): nothing in between. The firewall rules
+     from `install.ps1` and `ssh\install-server.ps1` are all it needs.
+   - **The router has it:** forward TCP 8005 and an outside SSH port (e.g. 22022 → 22) to the PC,
+     and reserve the PC's LAN address in the router's DHCP. The user does that in the router's
+     web page, or gives you its login for it. If the address is not static, set up dynamic DNS.
+   - **The router's WAN address is in 100.64.0.0/10, or differs from `ip=`:** the provider's
+     CGNAT. Nothing from outside reaches this PC, and port forwarding cannot change that. Tell
+     the user: a public ("white") IP from the provider, Tailscale, or a relay with a public IP.
+3. Put the address (or the dynamic DNS name) into `public_ip` in `config.json`: the server prints
+   it and puts it into the certificate. A client gets it as `-PublicHost` ([ssh/CLAUDE.md](ssh/CLAUDE.md)).
+4. Only a device outside can confirm that it works: the phone on mobile data, as in the final test.
+
 ### Before the user leaves
 
 Go through every item with the user. Each one, if missed, can cut them off. Do what you can with
