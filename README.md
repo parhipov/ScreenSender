@@ -73,6 +73,9 @@ or the phone will not reach the PC.
 3. Optionally set `public_ip` to your external IP. It is only used to print the internet address
    and to put it into the certificate.
 
+With [Tailscale](https://tailscale.com) on the PC and the phone no port forwarding is needed: the
+startup output then shows the PC's Tailscale address as well.
+
 ## Using it
 
 | On the phone | On the PC |
@@ -194,6 +197,10 @@ a UAC prompt, which is otherwise impossible to answer remotely. [CLAUDE.md](CLAU
 the PC alone (automatic sign-in, no sleep, no lock, power cuts) and updates. It is written for
 Claude Code, but people can follow it too.
 
+The [`ssh/`](ssh/README.md) folder adds a way in that does not depend on ScreenSender: an SSH server
+on the PC, so Claude Code on another computer can run commands there, copy files and repair
+ScreenSender if it stops.
+
 ## Notes and limitations
 
 - DXGI capture cannot see the lock screen or UAC prompts. When it fails, GDI is used for
@@ -237,6 +244,7 @@ Claude Code, but people can follow it too.
 | `config.example.json` | Example settings to copy to `config.json`. |
 | `deploy/` | Supervisor, update with rollback and the install script for unattended use. |
 | `CLAUDE.md` | How to install, leave and update an unattended PC, written for Claude Code. |
+| `ssh/` | SSH access to the PC for Claude Code, separate from ScreenSender. |
 
 ## License
 

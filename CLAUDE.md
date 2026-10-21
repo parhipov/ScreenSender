@@ -51,10 +51,13 @@ Do this while the user is at the PC, in an elevated PowerShell.
 3. `python -m venv .venv`, then `.venv\Scripts\python -m pip install -r requirements.txt`.
 4. `copy config.example.json config.json`. Let the user type the login and password into it
    themselves. For access from the internet set `"https": true`. `install.ps1` refuses the default password.
-5. `powershell -ExecutionPolicy Bypass -File deploy\install.ps1 -AdminShell` (leave out `-AdminShell`
+5. If Tailscale is to be one of the ways in, install it now, before the next step, so ScreenSender's
+   certificate covers its address: see [ssh/CLAUDE.md](ssh/CLAUDE.md).
+6. `powershell -ExecutionPolicy Bypass -File deploy\install.ps1 -AdminShell` (leave out `-AdminShell`
    if the user does not want the admin shell). It must end with "The server is up". Act on every
    WARNING it prints (firewall rules that block Python).
-6. Show the user the addresses from `runtime\server.log` and let them log in from the phone.
+7. Set up SSH for Claude, the way in that does not depend on ScreenSender: [ssh/CLAUDE.md](ssh/CLAUDE.md).
+8. Show the user the addresses from `runtime\server.log` and let them log in from the phone.
 
 ### Before the user leaves
 
@@ -92,8 +95,9 @@ their OK; the physical items are theirs.
    give no public IP at all; the test below shows that. Tailscale on the PC and the phone avoids
    all of this: the phone then opens ScreenSender at the PC's Tailscale address, with no port
    forwarding.
-10. **A second way in.** Recommend a second remote access tool that does not depend on ScreenSender,
-    such as Chrome Remote Desktop: it runs as a service and works even on the lock screen. Not
+10. **A second way in.** SSH from `ssh/` lets Claude on the user's laptop repair ScreenSender while
+    the PC is up. For the screen itself, recommend a remote access tool that does not depend on
+    ScreenSender, such as Chrome Remote Desktop: it runs as a service and works even on the lock screen. Not
     Remote Desktop (RDP): it takes over the console session, and after it disconnects ScreenSender
     sees no screen until someone signs in at the PC. If RDP was used anyway, give the session back
     from an elevated prompt with `tscon <session id> /dest:console` before disconnecting.
@@ -111,6 +115,8 @@ their OK; the physical items are theirs.
     - Reboot (`shutdown /r /t 0`) and touch nothing. Within about two minutes the phone must reach
       the login page again and control the desktop.
     - Better still: pull the power cord (or switch the smart plug), plug it back in, and repeat.
+    - From the client, `ssh\remote.ps1 hostname` through every route (`ssh <alias> hostname` for
+      each alias), also after the reboot.
 15. Tell the user: never lock (Win+L), sign out, sleep or shut down from the phone; each of these
     cuts the PC off. A restart is fine once the reboot test has passed.
 
