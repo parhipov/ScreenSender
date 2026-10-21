@@ -8,8 +8,10 @@ import json
 import logging
 import random
 import secrets
+import shutil
 import socket
 import ssl
+import subprocess
 import sys
 import threading
 import time
@@ -1121,6 +1123,25 @@ def lan_ip():
         return "127.0.0.1"
 
 
+TAILSCALE_EXE = r"C:\Program Files\Tailscale\tailscale.exe"
+
+
+def tailscale_addresses():
+    """This PC's Tailscale IP and name when Tailscale runs here: a way in without port forwarding."""
+    exe = shutil.which("tailscale") or (TAILSCALE_EXE if Path(TAILSCALE_EXE).exists() else None)
+    if not exe:
+        return []
+    try:
+        r = subprocess.run([exe, "status", "--json"], capture_output=True, text=True, timeout=5,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        me = json.loads(r.stdout)["Self"]
+    except Exception:  # noqa: BLE001 - stopped, logged out, or an output we do not understand
+        return []
+    ips = [ip for ip in me.get("TailscaleIPs") or [] if ":" not in ip]  # IPv4 is enough
+    name = (me.get("DNSName") or "").rstrip(".")
+    return ips + ([name] if name else [])
+
+
 def ensure_certificate(hosts):
     """Self-signed certificate for HTTPS, made once and reused; a new one when it has expired.
 
@@ -1200,14 +1221,17 @@ if __name__ == "__main__":
     port = cfg["port"]
     scheme = "https" if cfg["https"] else "http"
     ip = lan_ip()
+    tailnet = tailscale_addresses()
     ssl_context = None
     if cfg["https"]:
-        ensure_certificate([h for h in (ip, cfg["public_ip"], "127.0.0.1") if h])
+        ensure_certificate([h for h in (ip, cfg["public_ip"], "127.0.0.1", *tailnet) if h])
         ssl_context = (str(CERT_PATH), str(KEY_PATH))
     mon = grabber.monitor
     log(f"Capturing monitor {cfg['monitor']}: {mon['width']}x{mon['height']} at ({mon['left']},{mon['top']}), "
-          f"capture={cfg['capture']}" + ("" if dxcam or cfg["capture"] == "gdi" else " (dxcam not installed: GDI)"))
+        f"capture={cfg['capture']}" + ("" if dxcam or cfg["capture"] == "gdi" else " (dxcam not installed: GDI)"))
     say(f"  LAN:      {scheme}://{ip}:{port}/")
+    for host in tailnet:
+        say(f"  Tailscale: {scheme}://{host}:{port}/")
     if cfg["public_ip"]:
         say(f"  Internet: {scheme}://{cfg['public_ip']}:{port}/")
     else:
