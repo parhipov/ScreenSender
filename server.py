@@ -642,7 +642,7 @@ class Grabber(threading.Thread):
             with self._cond:
                 self._fresh_at = started
                 if self._waiting:
-                    self._cond.notify_all()  # a new viewer may be waiting for exactly this
+                    self._cond.notify_all()  # a new viewer or a screenshot may be waiting for exactly this
         time.sleep(max(0.0, self.interval - (time.monotonic() - started)))
 
     def healthy(self):
@@ -795,6 +795,22 @@ class Grabber(threading.Thread):
                 ready = self._cond.wait_for(lambda: viewer.req != req or self._news(viewer, view, asked),
                                             timeout=timeout)
                 return self._frame if ready else None
+            finally:
+                self._waiting -= 1
+                self._last_request = time.monotonic()
+
+    def snapshot(self, timeout=LONG_POLL):
+        """The picture from a capture pass that began after this call; None on timeout.
+
+        Waiting here wakes the capture loop the way a waiting viewer does.
+        """
+        with self._cond:
+            self._waiting += 1
+            self._last_request = asked = time.monotonic()
+            try:
+                if self._cond.wait_for(lambda: self._fresh_at >= asked, timeout=timeout):
+                    return self._frame
+                return None
             finally:
                 self._waiting -= 1
                 self._last_request = time.monotonic()
@@ -1006,6 +1022,28 @@ def frame():
             return Response(status=204)
         body = grabber.render_update(snap, viewer, view, preset, req)
     return Response(body, mimetype="application/octet-stream", headers={"Cache-Control": "no-store"})
+
+
+SCREENSHOT_QUALITY = 85  # small text stays readable; a PNG would be several times larger
+
+
+@app.get("/screenshot")
+def screenshot():
+    """The shown monitor as one JPEG, for scripts and AI agents (the page uses /frame).
+
+    Scaled to max_width like the page's picture; /click and the other input endpoints take
+    0..1 coordinates, so a point (x, y) of this picture is sent as x / width, y / height.
+    The pointer is not drawn in; X-Cursor gives its position in picture pixels.
+    """
+    frame = grabber.snapshot()
+    if frame is None:
+        return jsonify(error="no picture from the capture loop"), 503
+    buf = io.BytesIO()
+    frame.img.save(buf, "JPEG", quality=SCREENSHOT_QUALITY)
+    headers = {"Cache-Control": "no-store", "X-Monitor": str(frame.monitor_index)}
+    if frame.cursor:
+        headers["X-Cursor"] = f"{frame.cursor[0]},{frame.cursor[1]}"
+    return Response(buf.getvalue(), mimetype="image/jpeg", headers=headers)
 
 
 def point_from_request(data):

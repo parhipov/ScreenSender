@@ -6,7 +6,7 @@ Control your Windows PC from a phone browser. ScreenSender shows the desktop on 
 and you click, scroll and type on it from the phone. It works over the LAN or over the internet
 through a forwarded port. Nothing needs to be installed on the phone.
 
-It is a single Python file plus two HTML pages, and it is built for slow mobile links:
+It is a single Python file and a web page, and it is built for slow mobile links:
 only the parts of the screen that changed are sent, so a still screen costs no traffic at all.
 
 ## Features
@@ -200,6 +200,33 @@ Claude Code, but people can follow it too.
 The [`ssh/`](ssh/README.md) folder adds a way in that does not depend on ScreenSender: an SSH server
 on the PC, so Claude Code on another computer can run commands there, copy files and repair
 ScreenSender if it stops.
+
+## Scripts and AI agents
+
+A script or an AI agent on another computer can use the server the way the page does: log in once,
+then take screenshots and send input. With HTTPS add `-k` to curl, unless the certificate is trusted.
+
+```
+curl -c jar -d "username=alice&password=..." http://192.168.1.20:8005/login
+curl -b jar -o screen.jpg http://192.168.1.20:8005/screenshot
+curl -b jar -H "Content-Type: application/json" -d '{"x": 0.5, "y": 0.25}' http://192.168.1.20:8005/click
+```
+
+| Request | What it does |
+|---|---|
+| `GET /screenshot` | The shown monitor as a JPEG, scaled to `max_width`, taken after the request arrived. The pointer is not drawn; the `X-Cursor` header gives its position. |
+| `POST /click` | `{"x", "y", "button": "right", "mods": ["ctrl"]}`; `button` and `mods` are optional. |
+| `POST /mouse` | `{"actions": [{"drag": "down", "x", "y"}, {"drag": "move", …}, {"drag": "up", …}]}`: a drag with the left button. |
+| `POST /scroll` | `{"x", "y", "dy", "dx"}`: wheel notches; positive `dy` scrolls up. |
+| `POST /key` | `{"actions": [{"text": "…"}, {"paste": "…"}, {"key": "enter", "mods": ["ctrl"], "repeat": 1}]}` |
+
+Being logged in costs no traffic: data flows only while a request runs, and the screen is not even
+captured between requests. Each screenshot is a whole picture, though: about 200 KB for a busy
+1600×900 screen, where the page would get only the changed tiles.
+
+Coordinates are 0..1 of the picture: a point (x, y) of the screenshot is sent as x / width, y / height.
+Whoever has the password controls the PC, the agent included; `"allow_input": false` leaves it only
+the screenshots.
 
 ## Notes and limitations
 
