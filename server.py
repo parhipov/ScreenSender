@@ -28,6 +28,13 @@ from werkzeug.serving import BaseWSGIServer, WSGIRequestHandler, make_server
 
 MSS = getattr(mss, "MSS", None) or mss.mss  # mss 10 renamed the class
 
+# Under the supervisor this output is runtime/server.log. UTF-8, so that an error text in the
+# system language or a monitor name is written as it is instead of raising an encoding error of
+# its own, which would hide the real one.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 try:
     import dxcam  # DXGI Desktop Duplication, Windows only
 except Exception:  # noqa: BLE001 - not installed, or no DirectX on this machine
@@ -452,6 +459,10 @@ REFINE_DELAY = 0.7
 DXGI_RETRY = 30.0
 # A capture that nobody has looked at this long is released.
 CAPTURE_IDLE = 30.0
+# While someone watches, the monitor list is re-read this often: a monitor turned off or a
+# duplicated desktop leaves the rectangle taken at start outside the screen, and GDI then
+# returns black while DXGI finds no output.
+LAYOUT_CHECK = 2.0
 # The capture loop passes several times a second; this long without a pass means it is stuck.
 HEALTH_STALL = 30.0
 LONG_POLL = 5.0
@@ -595,6 +606,7 @@ class Grabber(threading.Thread):
         self._waiting = 0
         self._last_request = 0.0
         self._frame = None
+        self._layout_checked = 0.0
         self._cond = threading.Condition()
         self.heartbeat = time.monotonic()
         self._fresh_at = 0.0  # self._frame shows the screen as it was at this time (monotonic)
@@ -606,6 +618,23 @@ class Grabber(threading.Thread):
         with self._cond:
             self.monitor_index = index
             self.monitor = monitors[index]
+
+    def _check_layout(self):
+        """Follows the desktop when its layout changes after start (a monitor off, duplicate mode)."""
+        self._layout_checked = time.monotonic()
+        monitors = list_monitors()
+        index = self.monitor_index
+        if not 0 <= index < len(monitors):
+            index = 1 if len(monitors) > 1 else 0  # the chosen monitor is gone: the main one instead
+        new = monitors[index]
+        if index == self.monitor_index and all(new[k] == self.monitor[k]
+                                               for k in ("left", "top", "width", "height")):
+            return
+        log(f"display layout changed: capturing monitor {index}, "
+            f"{new['width']}x{new['height']} at ({new['left']},{new['top']})")
+        with self._cond:
+            self.monitor_index = index
+            self.monitor = new
 
     # -- capture loop (its own thread; mss and DXGI objects are used from here only)
 
@@ -629,6 +658,8 @@ class Grabber(threading.Thread):
             time.sleep(0.2)
             return
         started = time.monotonic()
+        if started - self._layout_checked > LAYOUT_CHECK:
+            self._check_layout()
         with self._cond:
             monitor, index = self.monitor, self.monitor_index
         buf = self._grab(monitor)
