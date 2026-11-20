@@ -44,19 +44,31 @@ The agent can also see the screen itself: see [Scripts and AI agents](#scripts-a
 
 ## Set it up with Claude
 
-The easiest way is to ask Claude. Open Claude Code on the PC you want to reach, and write:
+The easiest way is to let Claude Code on your laptop do it all over SSH. The PC needs neither
+Claude nor Python nor anything else from you, just one double-click:
 
-> Install ScreenSender from https://github.com/parhipov/ScreenSender on this PC, so I can use it
-> while I'm away. Follow its CLAUDE.md.
+1. **On the PC:** download this repository (Code → Download ZIP is enough), unpack it, and
+   double-click `give-claude-access.bat`. Allow admin rights once. It sets up an SSH server and
+   writes `claude-access-<PC name>.json` next to the .bat.
+2. **Take that file to your laptop** privately: a USB stick, your own cloud folder. It holds an admin
+   key to the PC.
+3. **On the laptop**, in Claude Code, write:
 
-Then, on your laptop:
+   > Here is an access file for my PC: `<path to the file>`. Import it following ssh/CLAUDE.md from
+   > https://github.com/parhipov/ScreenSender, then install ScreenSender on that PC over SSH,
+   > following its CLAUDE.md, so I can use it while I'm away.
 
-> Set up SSH access from this laptop to my PC. Follow ssh/CLAUDE.md from
-> https://github.com/parhipov/ScreenSender.
+Claude imports the file, installs ScreenSender on the PC and goes through the checklist before you
+leave: automatic sign-in, no sleep, no lock, UAC, the public address. It asks you only for what a
+person must do: choose the login and password, set up the router, check from the phone. From then on
+the same Claude can look after the PC from the laptop: update ScreenSender, fix it, run commands.
+Delete the file on both computers afterwards.
 
-Claude does the install and the checklist before you leave. It asks you only for what a person must
-do: type a password, set up the router. That's all: after this you don't need Claude on the PC.
-To do it by hand, see [Quick start](#quick-start).
+On the same network nothing else is needed. From outside, the laptop reaches the PC through a port
+forwarded on the router or through Tailscale; see [ssh/README.md](ssh/README.md#the-quickest-way-one-file).
+
+You can also open Claude Code on the PC itself and ask it to install ScreenSender following
+CLAUDE.md. To do it by hand, see [Quick start](#quick-start).
 
 ## Compared with other tools
 

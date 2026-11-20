@@ -42,7 +42,10 @@ way in. If the server stops and does not come back, they lose the PC until someo
 
 ## Install
 
-Do this while the user is at the PC, in an elevated PowerShell.
+Do this while the user is at the PC, in an elevated PowerShell. Over SSH from the user's laptop
+works as well (the shell there is elevated): the user runs `give-claude-access.bat` on the PC and
+gives you the file, you import it as in [ssh/CLAUDE.md](ssh/CLAUDE.md), and then do every step
+below through `ssh\remote.ps1`. Skip step 7 then: SSH is already set up.
 
 1. Check `python --version` (3.10 or newer) and `git --version`. If one is missing:
    `winget install Python.Python.3.12` or `winget install Git.Git`, then open a new shell.
