@@ -11,6 +11,8 @@ never kill ScreenSender, update it only through its task, ask before reboots and
 |---|---|---|
 | `install-server.ps1` | the PC, elevated | OpenSSH server started with Windows, key logins only, PowerShell as the shell, firewall rule; adds (`-PublicKey`) and removes (`-RemoveKey`) client keys |
 | `setup-client.ps1` | the client, no admin | an SSH key, aliases in `~/.ssh/config`, notes for Claude in `~/.claude/CLAUDE.md`; `-Remove` forgets the PC |
+| `give-access.ps1` | the PC, elevated (`give-claude-access.bat` in the root elevates and starts it) | `install-server.ps1`, plus a key made on the PC; writes `claude-access-<PC>.json` with the private key, account, addresses and host keys |
+| `import-access.ps1` | the client, no admin | reads that file: the key, the host keys in `known_hosts`, then `setup-client.ps1` with its routes |
 | `remote.ps1` | the client | runs PowerShell code on the PC through the first route that works; no quote escaping, UTF-8 output, the remote exit code |
 
 ## Routes
@@ -44,6 +46,19 @@ Do this while the user is at the PC, in an elevated PowerShell in the install fo
    incoming connections at all, as in "The public address" in the root [CLAUDE.md](../CLAUDE.md);
    behind a provider's CGNAT no forwarding helps. Then forward an external port to the PC's SSH
    port. A port other than 22 outside keeps most scanners away; logins need a key anyway.
+
+## From an access file
+
+When the user gives you a `claude-access-<PC>.json` (from `give-claude-access.bat` on the PC):
+
+1. `powershell -ExecutionPolicy Bypass -File ssh\import-access.ps1 <file> [-Name <alias>] [-PublicPort <port>]`.
+   `-Name` defaults to the PC's name in lower case. Add `-PublicPort` only when the router forwards
+   a port to the PC; the file says whether the public address is the PC's own (`public_ip_on_this_pc`)
+   or a VPN's exit (`full_tunnel_vpn`).
+2. It ends by trying each alias. If none works, read the file's `lan` and `tailscale` entries: the
+   client may be outside the PC's network, and Tailscale or port forwarding is then needed.
+3. Never print the private key, and tell the user to delete the file on both computers. If it may have
+   leaked, running the .bat again on the PC replaces the key (`install-server.ps1` keeps one key per name).
 
 ## Set up a client
 
@@ -84,6 +99,12 @@ blocks in `~/.ssh/config` like the ones the script writes, and plain `ssh home '
   is the lost part): `ssh\install-server.ps1 -RemoveKey claude@<client computer>`.
 
 ## Troubleshooting
+
+- **Where OpenSSH comes from:** `install-server.ps1` installs `ssh\openssh\OpenSSH-Win64-*.msi`
+  (Microsoft's Win32-OpenSSH, checked for Microsoft's signature) into `C:\Program Files\OpenSSH`, with
+  no internet. Only without a matching MSI (an ARM PC) does it use the Windows feature, which can time
+  out on Windows Update (0x80072EE2), and then GitHub. An OpenSSH already installed (System32 or
+  Program Files) is used as it is. To update the bundled one, replace the MSI with a newer release.
 
 - **Permission denied (publickey):** the key is not on the PC yet (run the `-PublicKey` line), `-User`
   is wrong, or the client's private key is readable by others. `setup-client.ps1` fixes the key's

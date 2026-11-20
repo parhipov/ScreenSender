@@ -10,3 +10,6 @@ cert.pem
 key.pem
 # Login cookie secret, made on first start
 secret.key
+# give-claude-access.bat output: holds a private key
+claude-access-*.json
+income/

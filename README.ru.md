@@ -343,6 +343,7 @@ curl -b jar -H "Content-Type: application/json" -d '{"x": 0.5, "y": 0.25}' http:
 | `deploy/` | Страж, обновление с откатом и скрипт установки для работы без присмотра. |
 | `CLAUDE.md` | Как установить, оставить и обновлять ПК без присмотра; написан для Claude Code. |
 | `ssh/` | Доступ к ПК по SSH для Claude Code, отдельно от ScreenSender. |
+| `give-claude-access.bat` | Один двойной щелчок на ПК: SSH-доступ для Claude и файл со всем, что ему нужно ([ssh/README.ru.md](ssh/README.ru.md#быстрее-всего-один-файл)). |
 | `docs/` | Картинки для этого README. |
 
 ## Лицензия

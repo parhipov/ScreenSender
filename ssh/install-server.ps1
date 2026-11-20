@@ -5,7 +5,7 @@
 # Safe to run again. Installs the Windows OpenSSH server, starts it with Windows (and again if it
 # fails), allows key logins only, makes PowerShell the shell, opens the port in the firewall, and adds
 # or removes client keys (a key is named by the comment at its end). A key login of this user runs as
-# administrator, without a UAC prompt.
+# administrator, without a UAC prompt. A new key replaces an earlier one of the same name.
 # Over SSH itself run it only while ScreenSender works: it restarts the SSH server.
 
 param(
@@ -22,16 +22,66 @@ if (-not $admin) { throw 'Run this from an elevated PowerShell (Run as administr
 
 $sshDir = Join-Path $env:ProgramData 'ssh'
 $configPath = Join-Path $sshDir 'sshd_config'
-$sshd = Join-Path $env:SystemRoot 'System32\OpenSSH\sshd.exe'
 $utf8 = New-Object System.Text.UTF8Encoding($false)  # sshd reads no BOM
 
 # ---- install
+# Microsoft's Win32-OpenSSH MSI that ships in ssh\openssh (it installs into Program Files and needs no
+# internet). Without it (an ARM PC): the Windows feature, which downloads from Windows Update and can
+# be blocked or time out (0x80072EE2), then the MSI from github.com/PowerShell/Win32-OpenSSH.
 
-$capability = Get-WindowsCapability -Online -Name 'OpenSSH.Server*' | Select-Object -First 1
-if ($capability.State -ne 'Installed') {
-    Write-Host 'Installing the OpenSSH server (this can take a few minutes)...'
-    Add-WindowsCapability -Online -Name $capability.Name | Out-Null
+function Find-OpenSsh {
+    foreach ($dir in (Join-Path $env:SystemRoot 'System32\OpenSSH'), (Join-Path $env:ProgramFiles 'OpenSSH')) {
+        if (Test-Path (Join-Path $dir 'sshd.exe')) { return $dir }
+    }
 }
+
+function Install-Msi($msi) {
+    $signature = Get-AuthenticodeSignature $msi
+    if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch '^CN=Microsoft Corporation,') {
+        throw "$msi is not signed by Microsoft ($($signature.Status)); not installing it."
+    }
+    Write-Host "Installing $msi ..."
+    $run = Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /norestart" -Wait -PassThru
+    if ($run.ExitCode -notin 0, 3010) { throw "The OpenSSH installer failed with code $($run.ExitCode)." }
+}
+
+function Install-MsiFromGitHub($arch) {
+    $url = $null
+    try {
+        $release = curl.exe -s --max-time 20 https://api.github.com/repos/PowerShell/Win32-OpenSSH/releases/latest | Out-String | ConvertFrom-Json
+        $url = @($release.assets | Where-Object { $_.name -like "OpenSSH-$arch-*.msi" })[0].browser_download_url
+    } catch { }
+    if (-not $url) { $url = "https://github.com/PowerShell/Win32-OpenSSH/releases/download/10.4.0.0p1-Preview/OpenSSH-$arch-v10.4.0.0.msi" }
+    $msi = Join-Path ([IO.Path]::GetTempPath()) ($url -split '/')[-1]
+    Write-Host "Downloading $url ..."
+    curl.exe -fsSL --retry 3 --max-time 600 -o $msi $url
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not download OpenSSH (curl exit $LASTEXITCODE). Download $url by hand, put it into $PSScriptRoot\openssh and run this again."
+    }
+    Install-Msi $msi
+}
+
+if (-not (Find-OpenSsh)) {
+    Write-Host 'Installing the OpenSSH server...'
+    $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'Arm64' } else { 'Win64' }
+    $bundled = Get-ChildItem (Join-Path $PSScriptRoot 'openssh') -Filter "OpenSSH-$arch-*.msi" -ErrorAction SilentlyContinue |
+        Sort-Object Name -Descending | Select-Object -First 1 -ExpandProperty FullName
+    if ($bundled) {
+        Install-Msi $bundled
+    } else {
+        try {
+            Write-Host 'From Windows Update (this can take a few minutes)...'
+            $capability = Get-WindowsCapability -Online -Name 'OpenSSH.Server*' | Select-Object -First 1
+            Add-WindowsCapability -Online -Name $capability.Name | Out-Null
+        } catch {
+            Write-Host "Windows Update did not deliver it ($($_.Exception.Message.Trim())); trying GitHub."
+            Install-MsiFromGitHub $arch
+        }
+    }
+}
+$openssh = Find-OpenSsh
+if (-not $openssh -or -not (Get-Service sshd -ErrorAction SilentlyContinue)) { throw 'The OpenSSH server did not install.' }
+$sshd = Join-Path $openssh 'sshd.exe'
 if (-not (Test-Path $configPath)) {
     # The first start makes the host keys and the default config.
     Start-Service sshd
@@ -86,7 +136,13 @@ if ($PublicKey -or $RemoveKey -or -not (Test-Path $keysFile)) {
     $keys = @()
     if (Test-Path $keysFile) { $keys = @([IO.File]::ReadAllLines($keysFile) | Where-Object { $_.Trim() }) }
     if ($RemoveKey) { $keys = @($keys | Where-Object { ($_.Trim() -split '\s+')[-1] -ne $RemoveKey }) }
-    if ($PublicKey -and -not ($keys | Where-Object { ($_ -split '\s+')[1] -eq ($PublicKey -split '\s+')[1] })) {
+    if ($PublicKey) {
+        # A new key replaces the one of the same name, as when a client makes its key again.
+        $newParts = $PublicKey -split '\s+'
+        $keys = @($keys | Where-Object {
+            $parts = $_.Trim() -split '\s+'
+            $parts[1] -ne $newParts[1] -and -not ($newParts.Count -gt 2 -and $parts[-1] -eq $newParts[-1])
+        })
         $keys += $PublicKey
     }
     [IO.File]::WriteAllLines($keysFile, [string[]]$keys, $utf8)
@@ -124,7 +180,9 @@ Write-Host "SSH server is up on port $Port; key logins only."
 Write-Host "  User:    $env:USERNAME"
 foreach ($address in $lan) { Write-Host "  LAN:     ssh -p $Port $env:USERNAME@$address" }
 Write-Host "  Keys:    $(if ($names) { $names -join ', ' } else { 'none yet: add one with -PublicKey' })"
-Write-Host "  Host key: $(& (Join-Path $env:SystemRoot 'System32\OpenSSH\ssh-keygen.exe') -lf (Join-Path $sshDir 'ssh_host_ed25519_key.pub'))"
+$keygen = @((Join-Path $openssh 'ssh-keygen.exe'), (Join-Path $env:SystemRoot 'System32\OpenSSH\ssh-keygen.exe'),
+    (Join-Path $env:ProgramFiles 'OpenSSH\ssh-keygen.exe')) | Where-Object { Test-Path $_ } | Select-Object -First 1
+if ($keygen) { Write-Host "  Host key: $(& $keygen -lf (Join-Path $sshDir 'ssh_host_ed25519_key.pub'))" }
 
 # sshd starts every command in a PowerShell that loads the user's profile; one the execution policy
 # blocks puts an error in front of every command's output.

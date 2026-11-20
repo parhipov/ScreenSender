@@ -143,11 +143,14 @@ Set-Block $claudeMd $claudeMarks[0] $claudeMarks[1] $guide
 
 Write-Host "Key: $key"
 Write-Host ''
-Write-Host 'Add it on the PC, in its admin shell (paste through ScreenSender: Ctrl+V in the browser):'
-Write-Host "    powershell -ExecutionPolicy Bypass -File ssh\install-server.ps1 -Port $Port -PublicKey `"$publicKey`""
-Write-Host ''
+$working = 0
 foreach ($alias in $aliases.Keys) {
     cmd /c "ssh -o BatchMode=yes -o ConnectTimeout=8 $alias exit >nul 2>&1"
-    $state = if ($LASTEXITCODE -eq 0) { 'works' } else { 'no connection yet' }
+    $state = if ($LASTEXITCODE -eq 0) { 'works'; $working++ } else { 'no connection yet' }
     Write-Host ("ssh {0,-12} {1}" -f $alias, $state)
+}
+if (-not $working) {
+    Write-Host ''
+    Write-Host 'If the key is not on the PC yet, add it there in its admin shell (paste through ScreenSender: Ctrl+V in the browser):'
+    Write-Host "    powershell -ExecutionPolicy Bypass -File ssh\install-server.ps1 -Port $Port -PublicKey `"$publicKey`""
 }

@@ -13,6 +13,8 @@ ScreenSender itself if it ever stops. It is separate from ScreenSender and can b
   and adds or removes client keys.
 - `setup-client.ps1`: run on the computer you connect from. Makes a key, adds short names for the PC
   to `~/.ssh/config`, and tells Claude Code there how to work with the PC.
+- `give-access.ps1` (started by `give-claude-access.bat` in the root) and `import-access.ps1`: the
+  same set-up the other way round, in one step on the PC and one file carried over.
 - `remote.ps1`: runs PowerShell code on the PC through the first route that works, without quote
   escaping and with readable output.
 
@@ -29,7 +31,28 @@ You can reach the PC three ways, and set up as many as you like:
 Tailscale needs no open ports and survives a changing IP, but some networks block VPN traffic; the
 public route then still works. Each route is independent of the others.
 
-## Set up
+## The quickest way: one file
+
+On the PC, put this repository anywhere and double-click `give-claude-access.bat` in its root.
+Windows asks for admin rights once. It sets up the SSH server, makes a key for Claude, and writes
+`claude-access-<PC name>.json` next to the .bat: the key, the Windows account, the PC's addresses
+(local network, Tailscale if it runs, public) and its host keys.
+
+Take that file to your computer privately (a USB stick, your own cloud folder), and give it to Claude
+Code there, or import it yourself:
+
+```
+powershell -ExecutionPolicy Bypass -File ssh\import-access.ps1 claude-access-HOME-PC.json
+```
+
+The PC is then `home-pc` (`home-pc-lan`, `home-pc-ts`) for ssh and Claude. Delete the file on both
+computers afterwards: whoever has it has administrator access to the PC. Running the .bat again makes
+a new key and the old one stops working.
+
+From outside the PC's network you need Tailscale on the PC (install it before running the .bat) or a
+port forwarded on the router: then add `-PublicPort <outside port>` to the import.
+
+## Set up step by step
 
 On the PC, in PowerShell run as administrator, in the repository folder:
 

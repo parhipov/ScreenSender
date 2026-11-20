@@ -345,6 +345,7 @@ the screenshots.
 | `deploy/` | Supervisor, update with rollback and the install script for unattended use. |
 | `CLAUDE.md` | How to install, leave and update an unattended PC, written for Claude Code. |
 | `ssh/` | SSH access to the PC for Claude Code, separate from ScreenSender. |
+| `give-claude-access.bat` | One double-click on a PC: SSH access for Claude and a file with all it needs ([ssh/README.md](ssh/README.md#the-quickest-way-one-file)). |
 | `docs/` | Pictures for this README. |
 
 ## License
