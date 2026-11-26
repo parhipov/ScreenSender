@@ -1,4 +1,5 @@
-# Runs PowerShell code on the PC that ssh\setup-client.ps1 set up, and prints what it prints.
+# Runs code on the PC that ssh\setup-client.ps1 set up, and prints what it prints: PowerShell on a
+# Windows PC, bash on a Linux one (setup-client.ps1 -Shell bash notes it in ~/.ssh/config).
 #     ssh\remote.ps1 'Get-Service sshd'                   # the code as an argument
 #     Get-Content job.ps1 -Raw | ssh\remote.ps1           # or on stdin
 #     ssh\remote.ps1 -Name home 'Get-Date'
@@ -19,18 +20,30 @@ $ErrorActionPreference = 'Stop'
 if (-not $Code) { $Code = if ($MyInvocation.ExpectingInput) { @($input) -join "`n" } else { [Console]::In.ReadToEnd() } }
 if (-not $Code.Trim()) { throw 'Give the code to run, as an argument or on stdin.' }
 
-$encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Code))
-if ($encoded.Length -gt 24000) { throw 'The code is too long for one command: copy it as a script with scp and run that.' }
-# Runs in the PowerShell that sshd starts. Not through powershell -EncodedCommand: Windows PowerShell
-# then sends errors back as CLIXML instead of text.
-$remote = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; `$ProgressPreference = 'SilentlyContinue'; " +
-          "Invoke-Expression ([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('$encoded')))"
-# That PowerShell loads the user's profile; one the execution policy blocks prints this error first.
-$profileNoise = '(?ms)^\. : .*?WindowsPowerShell.*?FullyQualifiedErrorId : UnauthorizedAccess\s*'
-
 $profileDir = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
 $config = Join-Path $profileDir '.ssh\config'
 $known = if (Test-Path $config) { [IO.File]::ReadAllLines($config) } else { @() }
+# The shell there: the "# shell: bash" line setup-client.ps1 writes into this PC's block.
+$begin = [Array]::IndexOf($known, "# >>> ScreenSender $Name >>>")
+$end = [Array]::IndexOf($known, "# <<< ScreenSender $Name <<<")
+$bash = $begin -ge 0 -and $end -gt $begin -and ($known[$begin..$end] -contains '# shell: bash')
+
+if ($bash) {
+    $encoded = [Convert]::ToBase64String((New-Object Text.UTF8Encoding($false)).GetBytes(($Code -replace "`r`n", "`n")))
+    # Through a file, not bash -s: a command in the code that reads stdin would eat the rest of it.
+    # No double quotes, so it passes the Windows command line as it is.
+    $remote = "f=`$(mktemp) && echo $encoded | base64 -d > `$f && bash `$f; r=`$?; rm -f `$f; exit `$r"
+} else {
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Code))
+    # Runs in the PowerShell that sshd starts. Not through powershell -EncodedCommand: Windows PowerShell
+    # then sends errors back as CLIXML instead of text.
+    $remote = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; `$ProgressPreference = 'SilentlyContinue'; " +
+              "Invoke-Expression ([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('$encoded')))"
+}
+if ($encoded.Length -gt 24000) { throw 'The code is too long for one command: copy it as a script with scp and run that.' }
+# That PowerShell loads the user's profile; one the execution policy blocks prints this error first.
+$profileNoise = '(?ms)^\. : .*?WindowsPowerShell.*?FullyQualifiedErrorId : UnauthorizedAccess\s*'
+
 $aliases = @("$Name-ts", $Name, "$Name-lan") | Where-Object { $known -contains "Host $_" }
 if (-not $aliases) { throw "No ssh aliases for '$Name' in $config; run ssh\setup-client.ps1 first." }
 $cache = Join-Path ([IO.Path]::GetTempPath()) "screensender-$Name.alias"

@@ -3,8 +3,11 @@
 import ctypes
 import http.cookiejar
 import json
+import os
+import signal
 import ssl
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -15,17 +18,61 @@ ROOT = Path(__file__).resolve().parent.parent
 RUNTIME = ROOT / "runtime"
 PID_FILE = RUNTIME / "server.pid"
 HOLD = RUNTIME / "hold"
-VENV_PYTHON = ROOT / ".venv" / "Scripts" / "python.exe"
+IS_WINDOWS = sys.platform == "win32"
+VENV_PYTHON = ROOT / ".venv" / ("Scripts/python.exe" if IS_WINDOWS else "bin/python")
+# For every subprocess: no console window flashing up under pythonw.exe.
+NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW} if IS_WINDOWS else {}
 
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 STILL_ACTIVE = 259
 
-kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-kernel32.OpenProcess.restype = ctypes.c_void_p
-kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
-kernel32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
-kernel32.QueryFullProcessImageNameW.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_wchar_p,
-                                                ctypes.POINTER(ctypes.c_ulong)]
+if IS_WINDOWS:
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.OpenMutexW.restype = ctypes.c_void_p
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+    kernel32.QueryFullProcessImageNameW.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_wchar_p,
+                                                    ctypes.POINTER(ctypes.c_ulong)]
+else:
+    import fcntl
+
+
+def lock(name):
+    """Takes runtime/<name>.lock for as long as this process lives; False if another one holds it.
+
+    Windows: a named mutex, Linux: flock. Both go away with the process, however it ends.
+    """
+    if IS_WINDOWS:
+        handle = kernel32.CreateMutexW(None, False, f"Local\\ScreenSender{name.title()}")
+        lock.held.append(handle)
+        return ctypes.get_last_error() != 183  # ERROR_ALREADY_EXISTS
+    f = open(RUNTIME / f"{name}.lock", "a")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.close()
+        return False
+    lock.held.append(f)
+    return True
+
+
+lock.held = []
+
+
+def locked(name):
+    """Whether another process holds lock(name) now."""
+    if IS_WINDOWS:
+        handle = kernel32.OpenMutexW(0x00100000, False, f"Local\\ScreenSender{name.title()}")  # SYNCHRONIZE
+        if handle:
+            kernel32.CloseHandle(handle)
+        return bool(handle)
+    try:
+        with open(RUNTIME / f"{name}.lock", "a") as f:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return True
+    return False
 
 
 # ---------------------------------------------------------------- the server's address
@@ -111,6 +158,17 @@ def server_pid():
 
 
 def alive(pid):
+    if not IS_WINDOWS:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        try:  # a zombie has exited; only its parent has not collected it yet
+            return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+        except (OSError, IndexError):
+            return False
     handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
     if not handle:
         return False
@@ -123,6 +181,14 @@ def alive(pid):
 
 def is_server(pid):
     """pid is the venv's python, as the supervisor starts it; pids get reused by other programs."""
+    if not IS_WINDOWS:
+        # The venv's python is a link to the system one, so: server.py, run in this folder.
+        try:
+            args = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+            cwd = Path(os.readlink(f"/proc/{pid}/cwd"))
+        except OSError:
+            return False
+        return cwd == ROOT.resolve() and b"server.py" in args
     handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
     if not handle:
         return False
@@ -139,8 +205,16 @@ def kill_server(pid):
     """Kills the server's process tree. True when it is gone (or was not running)."""
     if pid is None or not alive(pid) or not is_server(pid):
         return True
-    subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True,
-                   creationflags=subprocess.CREATE_NO_WINDOW)
+    if IS_WINDOWS:
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, **NO_WINDOW)
+    else:
+        # The supervisor starts it in a group of its own, so grim, wtype and the like go too.
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except PermissionError:
+            return False
+        except ProcessLookupError:
+            return True
     for _ in range(20):
         if not alive(pid):
             return True

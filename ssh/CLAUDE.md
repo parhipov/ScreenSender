@@ -13,7 +13,8 @@ never kill ScreenSender, update it only through its task, ask before reboots and
 | `setup-client.ps1` | the client, no admin | an SSH key, aliases in `~/.ssh/config`, notes for Claude in `~/.claude/CLAUDE.md`; `-Remove` forgets the PC |
 | `give-access.ps1` | the PC, elevated (`give-claude-access.bat` in the root elevates and starts it) | `install-server.ps1`, plus a key made on the PC; writes `claude-access-<PC>.json` with the private key, account, addresses and host keys |
 | `import-access.ps1` | the client, no admin | reads that file: the key, the host keys in `known_hosts`, then `setup-client.ps1` with its routes |
-| `remote.ps1` | the client | runs PowerShell code on the PC through the first route that works; no quote escaping, UTF-8 output, the remote exit code |
+| `give-access.py` | a Linux PC (Raspberry Pi), as the login user with sudo (`give-claude-access.sh` in the root starts it) | the OpenSSH server on and started at boot, a key in that user's `authorized_keys`; the same file, with `"shell": "bash"` |
+| `remote.ps1` | the client | runs code on the PC through the first route that works: PowerShell, or bash when the file said so (`# shell: bash` in the alias block of `~/.ssh/config`); no quote escaping, UTF-8 output, the remote exit code |
 
 ## Routes
 
@@ -47,9 +48,21 @@ Do this while the user is at the PC, in an elevated PowerShell in the install fo
    behind a provider's CGNAT no forwarding helps. Then forward an external port to the PC's SSH
    port. A port other than 22 outside keeps most scanners away; logins need a key anyway.
 
+### A Linux PC (Raspberry Pi)
+
+1. **Tailscale** (recommended): `curl -fsSL https://tailscale.com/install.sh | sh`, then
+   `sudo tailscale up`; the user signs in with the link it prints, and turns off key expiry as above.
+   It runs as a system service, with or without a sign-in.
+2. **SSH server and key:** `bash give-claude-access.sh` in the repository, as the user ScreenSender
+   runs as (the desktop user, `pi` on older images). It leaves password logins as they are; before a
+   port is forwarded from the internet, suggest
+   `echo 'PasswordAuthentication no' | sudo tee /etc/ssh/sshd_config.d/10-keys-only.conf && sudo systemctl reload ssh`,
+   once a key login has been seen to work: it is the user's call.
+3. **Router:** as for Windows.
+
 ## From an access file
 
-When the user gives you a `claude-access-<PC>.json` (from `give-claude-access.bat` on the PC):
+When the user gives you a `claude-access-<PC>.json` (from `give-claude-access.bat` or `.sh` on the PC):
 
 1. `powershell -ExecutionPolicy Bypass -File ssh\import-access.ps1 <file> [-Name <alias>] [-PublicPort <port>]`.
    `-Name` defaults to the PC's name in lower case. Add `-PublicPort` only when the router forwards
@@ -90,13 +103,19 @@ blocks in `~/.ssh/config` like the ones the script writes, and plain `ssh home '
   ```
 - Keep each call short; start long jobs with `Start-Process` or a scheduled task and poll them.
 - `install-server.ps1` restarts the SSH server. Over SSH, run it only while ScreenSender works.
+- **On a Linux PC** the code runs in bash as the login user, with sudo. Programs started over SSH
+  have no display either; to show one on the desktop, give it the session's:
+  `WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/run/user/$(id -u) nohup foot >/dev/null 2>&1 &`
+  on Wayland (Raspberry Pi OS), `DISPLAY=:0` on X11. ScreenSender there is a systemd user service:
+  `systemctl --user status screensender`; the root [CLAUDE.md](../CLAUDE.md) has the rest.
 
 ## Keys
 
 - A key is named by the comment at its end: `claude@<client computer>`.
 - The client's key has no passphrase, so Claude can use it unattended; whoever can read the client
   user's files can use it. If a client is lost, remove its key on the PC (through ScreenSender if SSH
-  is the lost part): `ssh\install-server.ps1 -RemoveKey claude@<client computer>`.
+  is the lost part): `ssh\install-server.ps1 -RemoveKey claude@<client computer>`. On a Linux PC,
+  delete the line ending in that name from `~/.ssh/authorized_keys`.
 
 ## Troubleshooting
 

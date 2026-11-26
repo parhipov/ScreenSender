@@ -1,4 +1,7 @@
-"""ScreenSender: shows the desktop on a web page (sending only changed tiles) and accepts input back."""
+"""ScreenSender: shows the desktop on a web page (sending only changed tiles) and accepts input back.
+
+Windows here; Linux (Raspberry Pi OS and other desktops) through linux.py.
+"""
 
 import ctypes
 import hmac
@@ -94,6 +97,9 @@ if IS_WINDOWS:
         ctypes.windll.shcore.SetProcessDpiAwareness(2)
     except Exception:
         ctypes.windll.user32.SetProcessDPIAware()
+else:
+    import linux
+    linux.log = log
 
 
 # ---------------------------------------------------------------- mouse
@@ -113,30 +119,48 @@ WHEEL_DELTA = 120
 
 def get_cursor_pos():
     if not IS_WINDOWS:
-        return None
+        return linux.cursor_pos()
     pt = _POINT()
     ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
     return pt.x, pt.y
 
 
+class WinPointer:
+    """The three things Mouse needs from the system, through user32."""
+
+    BUTTONS = {"left": (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
+               "right": (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP)}
+
+    def move(self, x, y):
+        ctypes.windll.user32.SetCursorPos(int(x), int(y))
+
+    def button(self, name, down):
+        ctypes.windll.user32.mouse_event(self.BUTTONS[name][0 if down else 1], 0, 0, 0, 0)
+
+    def wheel(self, dy, dx):
+        if dy:
+            ctypes.windll.user32.mouse_event(MOUSEEVENTF_WHEEL, 0, 0, dy * WHEEL_DELTA, 0)
+        if dx:
+            ctypes.windll.user32.mouse_event(MOUSEEVENTF_HWHEEL, 0, 0, dx * WHEEL_DELTA, 0)
+
+
 class Mouse:
     # Taps are never pixel-exact, so a quick second tap nearby is snapped to the first
-    # one; otherwise Windows would not recognise it as a double click.
+    # one; otherwise the system would not recognise it as a double click.
     DOUBLE_TAP_TIME = 0.45
     DOUBLE_TAP_DIST = 25
 
     # A held button is let go when the page goes quiet, e.g. the connection dropped mid-drag.
     DRAG_TIMEOUT = 10.0
 
-    def __init__(self):
+    def __init__(self, pointer):
+        self.pointer = pointer
         self._last = (0.0, 0, 0)
         self._lock = threading.Lock()
         self._held = False
         self._release_timer = None
 
     def click(self, x, y, button="left"):
-        if not IS_WINDOWS:
-            raise RuntimeError("mouse input is implemented for Windows only")
         with self._lock:
             now = time.monotonic()
             last_t, last_x, last_y = self._last
@@ -145,36 +169,27 @@ class Mouse:
                     and abs(y - last_y) <= self.DOUBLE_TAP_DIST):
                 x, y = last_x, last_y
             self._last = (now, x, y) if button == "left" else (0.0, 0, 0)
-
-            down, up = ((MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP) if button == "right"
-                        else (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP))
-            user32 = ctypes.windll.user32
-            user32.SetCursorPos(int(x), int(y))
-            user32.mouse_event(down, 0, 0, 0, 0)
-            user32.mouse_event(up, 0, 0, 0, 0)
+            self.pointer.move(x, y)
+            self.pointer.button(button, True)
+            self.pointer.button(button, False)
 
     def wheel(self, x, y, dy=0, dx=0):
-        """Scrolls by whole notches at a point; Windows scrolls the window under the pointer."""
+        """Scrolls by whole notches at a point; the window under the pointer scrolls."""
         with self._lock:
             self._last = (0.0, 0, 0)
-            user32 = ctypes.windll.user32
-            user32.SetCursorPos(int(x), int(y))
-            if dy:
-                user32.mouse_event(MOUSEEVENTF_WHEEL, 0, 0, dy * WHEEL_DELTA, 0)
-            if dx:
-                user32.mouse_event(MOUSEEVENTF_HWHEEL, 0, 0, dx * WHEEL_DELTA, 0)
+            self.pointer.move(x, y)
+            self.pointer.wheel(dy, dx)
 
     def drag(self, action, x, y):
         """Left-button drag: "down" where it starts, "move" while it goes on, "up" where it ends."""
         with self._lock:
             self._last = (0.0, 0, 0)
-            user32 = ctypes.windll.user32
-            user32.SetCursorPos(int(x), int(y))
+            self.pointer.move(x, y)
             if action == "down" and not self._held:
-                user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+                self.pointer.button("left", True)
                 self._held = True
             elif action == "up" and self._held:
-                user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+                self.pointer.button("left", False)
                 self._held = False
             if self._release_timer:
                 self._release_timer.cancel()
@@ -188,7 +203,7 @@ class Mouse:
         with self._lock:
             # A move that arrived meanwhile has started a newer timer; then this one is stale.
             if self._held and threading.current_thread() is self._release_timer:
-                ctypes.windll.user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+                self.pointer.button("left", False)
                 self._held = False
 
 
@@ -351,6 +366,8 @@ class Clipboard:
 # ---------------------------------------------------------------- capture backends
 
 def list_monitors():
+    if not IS_WINDOWS:
+        return linux.monitors()
     with MSS() as sct:
         return [dict(m) for m in sct.monitors]
 
@@ -690,6 +707,8 @@ class Grabber(threading.Thread):
             self._capture = None
 
     def _open_capture(self, monitor):
+        if not IS_WINDOWS:
+            return linux.open_capture(monitor)
         if self._want_dxgi():
             try:
                 return DxgiCapture(monitor)
@@ -702,7 +721,8 @@ class Grabber(threading.Thread):
 
     def _grab(self, monitor):
         cap = self._capture
-        if cap and (cap.monitor is not monitor or (isinstance(cap, GdiCapture) and self._want_dxgi())):
+        if cap and (cap.monitor is not monitor or (isinstance(cap, GdiCapture) and self._want_dxgi())
+                    or (not IS_WINDOWS and cap.stale())):
             self._close_capture()
             cap = None
         if cap is None:
@@ -719,8 +739,11 @@ class Grabber(threading.Thread):
             return None
 
     def _to_image(self, buf):
+        """buf: (h, w, 4) BGRX from mss and DXGI, or (h, w, 3) RGB from grim and the framebuffer."""
         h, w = buf.shape[:2]
-        img = Image.frombuffer("RGB", (w, h), buf, "raw", "BGRX", 0, 1)
+        if not buf.flags.c_contiguous:
+            buf = np.ascontiguousarray(buf)
+        img = Image.frombuffer("RGB", (w, h), buf, "raw", "BGRX" if buf.shape[2] == 4 else "RGB", 0, 1)
         if self.max_width and w > self.max_width:
             # reducing_gap: an integer-factor reduce first, then the exact resize; twice as fast.
             img = img.resize((self.max_width, round(h * self.max_width / w)), Image.BILINEAR,
@@ -898,14 +921,24 @@ class Grabber(threading.Thread):
 grabber = Grabber(cfg["monitor"], cfg["fps"], cfg["max_width"], cfg["draw_cursor"], cfg["tile_size"],
                   cfg["capture"])
 viewers = Viewers()
-mouse = Mouse()
-keyboard = Keyboard()
-clipboard = Clipboard()
+if IS_WINDOWS:
+    mouse, keyboard, clipboard = Mouse(WinPointer()), Keyboard(), Clipboard()
+else:
+    linux_input = linux.Input()
+    mouse = Mouse(linux.Pointer(linux_input))
+    keyboard, clipboard = linux.Keyboard(linux_input), linux.Clipboard()
 
 # ---------------------------------------------------------------- web
 
 app = Flask(__name__, static_folder=None)
 app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024
+
+
+@app.errorhandler(RuntimeError)
+def input_failed(e):
+    # Input the system cannot give now, e.g. clicks on Wayland without /dev/uinput: say why.
+    log(f"{request.path}: {e}")
+    return jsonify(error=str(e)), 503
 
 
 AUTH_COOKIE = "screensender_auth"
@@ -937,7 +970,7 @@ def set_auth_cookie(resp):
 
 
 def input_enabled():
-    return bool(cfg["allow_input"] and IS_WINDOWS)
+    return bool(cfg["allow_input"] and (IS_WINDOWS or linux_input.ready()))
 
 
 @app.before_request
@@ -1003,7 +1036,7 @@ def info():
     # Cycle order for the page: each monitor, then all of them together (0) if there are several.
     order = list(range(1, len(monitors))) + ([0] if len(monitors) > 2 else [])
     return jsonify(input=input_enabled(), monitor=grabber.monitor_index, capture=grabber.backend,
-                   https=bool(cfg["https"]),
+                   https=bool(cfg["https"]), os="windows" if IS_WINDOWS else "linux",
                    monitors=[{"index": i, "width": monitors[i]["width"], "height": monitors[i]["height"]}
                              for i in order])
 
@@ -1185,7 +1218,10 @@ def key():
             try:
                 clipboard.set_text(a["paste"])
             except RuntimeError as e:
-                return jsonify(error=str(e)), 503
+                if IS_WINDOWS or len(a["paste"]) > MAX_TEXT:
+                    return jsonify(error=str(e)), 503
+                keyboard.type_text(a["paste"])  # no clipboard (the framebuffer): a short text is typed
+                continue
             keyboard.press("v", ["ctrl"])
         else:
             keyboard.press(str(a["key"]).lower(), a.get("mods") or [], a.get("repeat", 1))
@@ -1324,8 +1360,13 @@ if __name__ == "__main__":
         ensure_certificate([h for h in (*lan, cfg["public_ip"], "127.0.0.1", *tailnet) if h])
         ssl_context = (str(CERT_PATH), str(KEY_PATH))
     mon = grabber.monitor
-    log(f"Capturing monitor {cfg['monitor']}: {mon['width']}x{mon['height']} at ({mon['left']},{mon['top']}), "
-        f"capture={cfg['capture']}" + ("" if dxcam or cfg["capture"] == "gdi" else " (dxcam not installed: GDI)"))
+    if IS_WINDOWS:
+        how = f"capture={cfg['capture']}" + ("" if dxcam or cfg["capture"] == "gdi" else " (dxcam not installed: GDI)")
+    else:
+        how = f"screen: {linux.current_session() or 'none yet'}"
+        if cfg["allow_input"] and linux_input.problem:
+            log(f"Input: {linux_input.problem}; meanwhile xdotool on X11, wtype on Wayland (keys only)")
+    log(f"Capturing monitor {cfg['monitor']}: {mon['width']}x{mon['height']} at ({mon['left']},{mon['top']}), {how}")
     for host in lan:
         say(f"  LAN:      {scheme}://{host}:{port}/")
     for host in tailnet:

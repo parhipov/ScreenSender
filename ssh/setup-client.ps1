@@ -10,8 +10,9 @@
 #     (Tailscale), <Name>-lan (same network), for the hosts given;
 #   - tells Claude Code on this computer how to work there, in ~/.claude/CLAUDE.md;
 #   - prints the line that adds the key on the PC, and tries every alias.
-# -User is the Windows account name on that PC; -Port is its SSH port, -PublicPort the one the router
-# forwards to it. To forget the PC here (aliases, Claude's notes, the key):
+# -User is the account name on that PC; -Port is its SSH port, -PublicPort the one the router
+# forwards to it. -Shell bash for a Linux PC (a Raspberry Pi); remote.ps1 reads it back from the
+# ssh config. To forget the PC here (aliases, Claude's notes, the key):
 #     powershell -ExecutionPolicy Bypass -File ssh\setup-client.ps1 -Name home -Remove
 
 param(
@@ -22,11 +23,14 @@ param(
     [string]$TailscaleHost,
     [string]$PublicHost,
     [int]$PublicPort = 0,
-    [string]$RemoteDir = 'C:\ScreenSender',
+    [string]$RemoteDir,
+    [ValidateSet('powershell', 'bash')][string]$Shell = 'powershell',
     [switch]$Remove
 )
 
 $ErrorActionPreference = 'Stop'
+$linux = $Shell -eq 'bash'
+if (-not $RemoteDir) { $RemoteDir = if ($linux) { '~/ScreenSender' } else { 'C:\ScreenSender' } }
 
 $profileDir = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
 $sshDir = Join-Path $profileDir '.ssh'
@@ -71,7 +75,7 @@ foreach ($tool in 'ssh', 'ssh-keygen') {
         throw "No $tool here. On Windows: Settings -> Apps -> Optional features -> OpenSSH Client."
     }
 }
-if (-not $User) { throw 'Give -User: the Windows account name on that PC.' }
+if (-not $User) { throw 'Give -User: the account name on that PC.' }
 if (-not ($LanHost -or $TailscaleHost -or $PublicHost)) { throw 'Give at least one of -LanHost, -TailscaleHost, -PublicHost.' }
 if (-not $PublicPort) { $PublicPort = $Port }
 New-Item -ItemType Directory -Force $sshDir | Out-Null
@@ -110,13 +114,35 @@ $hostLines = foreach ($alias in $aliases.Keys) {
     '    ServerAliveInterval 30'
     '    ServerAliveCountMax 3'
 }
+# remote.ps1 reads the remote shell from this comment; ssh ignores it.
+$hostLines = @("# shell: $Shell") + @($hostLines)
 Set-Block $sshConfig $sshMarks[0] $sshMarks[1] $hostLines
 
 # ---- ~/.claude/CLAUDE.md: what every Claude Code session here should know about that PC
 
 $routes = ($aliases.Keys | ForEach-Object { "``$_`` ($($aliases[$_][2]))" }) -join ', '
 $remoteScript = Join-Path $PSScriptRoot 'remote.ps1'
-$guide = @(
+$guide = if ($linux) { @(
+    "## Remote PC ``$Name`` (ScreenSender, Linux)",
+    '',
+    "``$Name`` is a Linux PC (a Raspberry Pi) far away. The user may be controlling it right now through",
+    'ScreenSender, with no other way in: if ScreenSender stops there, they lose it until someone is there.',
+    '',
+    "- Run shell code there with ``& '$remoteScript' -Name $Name '<code>'``",
+    "  (from Bash: ``powershell -NoProfile -File '$remoteScript' -Name $Name '<code>'``). It finds a working",
+    "  route, needs no escaping of quotes and returns the output. The code runs in bash as $User; use sudo",
+    '  for system changes.',
+    "- Plain ssh works too, with the aliases $routes;",
+    '  the shell there is bash. Copy files with `scp`.',
+    "- Its runbook is ``$RemoteDir/CLAUDE.md`` on that PC; read it (``cat $RemoteDir/CLAUDE.md`` there)",
+    '  before you touch ScreenSender, the network, power, sign-in or the SSH server there.',
+    '- Never kill python processes there or stop the screensender user service. Update it only with',
+    "  ``systemctl --user start screensender-update`` and read the RESULT line in ``$RemoteDir/runtime/update.log``.",
+    '- Ask the user before rebooting, shutting down or logging out there, and before changing its',
+    '  firewall, network or SSH settings.',
+    '- Programs started over SSH have no desktop unless given one: GUI apps do not show up on the screen.',
+    '- Keep each ssh call short; start long jobs with systemd-run --user or nohup and poll them.'
+) } else { @(
     "## Remote PC ``$Name`` (ScreenSender)",
     '',
     "``$Name`` is a Windows PC far away. The user may be controlling it right now through ScreenSender,",
@@ -135,7 +161,7 @@ $guide = @(
     '  firewall, network or SSH settings.',
     '- Programs started over SSH have no desktop: GUI apps do not show up on the screen.',
     '- Keep each ssh call short; start long jobs with Start-Process or a scheduled task and poll them.'
-)
+) }
 New-Item -ItemType Directory -Force (Split-Path $claudeMd) | Out-Null
 Set-Block $claudeMd $claudeMarks[0] $claudeMarks[1] $guide
 
@@ -149,7 +175,11 @@ foreach ($alias in $aliases.Keys) {
     $state = if ($LASTEXITCODE -eq 0) { 'works'; $working++ } else { 'no connection yet' }
     Write-Host ("ssh {0,-12} {1}" -f $alias, $state)
 }
-if (-not $working) {
+if (-not $working -and $linux) {
+    Write-Host ''
+    Write-Host "If the key is not on the PC yet, add it there in a terminal as $User (paste through ScreenSender: Ctrl+V in the browser):"
+    Write-Host "    mkdir -p ~/.ssh && echo '$publicKey' >> ~/.ssh/authorized_keys && chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"
+} elseif (-not $working) {
     Write-Host ''
     Write-Host 'If the key is not on the PC yet, add it there in its admin shell (paste through ScreenSender: Ctrl+V in the browser):'
     Write-Host "    powershell -ExecutionPolicy Bypass -File ssh\install-server.ps1 -Port $Port -PublicKey `"$publicKey`""

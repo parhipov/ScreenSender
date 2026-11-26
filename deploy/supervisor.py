@@ -1,19 +1,20 @@
 """Keeps server.py running on an unattended PC: starts it again whenever it exits or stops answering.
 
-Started at sign-in (and every few minutes, in case it died) by the "ScreenSender" scheduled task,
-see deploy/install.ps1, with pythonw.exe from the project venv, so no window appears. The server's
+Windows: started at sign-in (and every few minutes, in case it died) by the "ScreenSender"
+scheduled task, see deploy/install.ps1, with pythonw.exe from the project venv, so no window
+appears. Linux: the systemd user service screensender.service, see deploy/install.sh. The server's
 output goes to runtime/server.log. While runtime/hold exists the server is not started;
 deploy/update.py uses it to swap the code.
 """
 
-import ctypes
 import subprocess
 import sys
 import time
 import traceback
 from pathlib import Path
 
-from common import HOLD, PID_FILE, ROOT, RUNTIME, base_url, kill_server, server_pid, status
+from common import (HOLD, IS_WINDOWS, NO_WINDOW, PID_FILE, ROOT, RUNTIME, base_url, kill_server, lock,
+                    server_pid, status)
 
 LOG = RUNTIME / "server.log"
 
@@ -24,14 +25,11 @@ HOLD_MAX_AGE = 15 * 60
 HEALTH_GRACE = 60     # seconds after a start before the first health check
 HEALTH_EVERY = 30
 HEALTH_FAILURES = 3   # in a row; then the server is restarted
-ERROR_ALREADY_EXISTS = 183
 
 
 def first_instance():
     # A second supervisor would start a second server on the same port.
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    first_instance.mutex = kernel32.CreateMutexW(None, False, "Local\\ScreenSenderSupervisor")
-    return ctypes.get_last_error() != ERROR_ALREADY_EXISTS
+    return lock("supervisor")
 
 
 def note(text):
@@ -71,9 +69,10 @@ def run_server(python):
         health_url = None
     note("starting the server")
     with open(LOG, "ab") as log:
+        # Linux: a process group of its own, so that killing it takes grim and wtype along.
         proc = subprocess.Popen([str(python), "-u", "server.py"], cwd=ROOT, stdin=subprocess.DEVNULL,
-                                stdout=log, stderr=subprocess.STDOUT,
-                                creationflags=subprocess.CREATE_NO_WINDOW)
+                                stdout=log, stderr=subprocess.STDOUT, start_new_session=not IS_WINDOWS,
+                                **NO_WINDOW)
     PID_FILE.write_text(str(proc.pid))
     failures, next_check = 0, time.monotonic() + HEALTH_GRACE
     while True:
@@ -95,15 +94,15 @@ def run_server(python):
 
 
 def main():
+    RUNTIME.mkdir(exist_ok=True)
     if not first_instance():
         return
-    RUNTIME.mkdir(exist_ok=True)
     # No update runs before the supervisor does: a hold now was left by one that a reboot cut off.
     HOLD.unlink(missing_ok=True)
     # A server left over from a supervisor that was killed would keep the port from the new one.
     kill_server(server_pid())
     # pythonw.exe has no stdout; the server runs under python.exe, without a console window.
-    python = Path(sys.executable).with_name("python.exe")
+    python = Path(sys.executable).with_name("python.exe") if IS_WINDOWS else Path(sys.executable)
     while True:
         try:
             if held():

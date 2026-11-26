@@ -52,6 +52,19 @@ a new key and the old one stops working.
 From outside the PC's network you need Tailscale on the PC (install it before running the .bat) or a
 port forwarded on the router: then add `-PublicPort <outside port>` to the import.
 
+### A Raspberry Pi or another Linux PC
+
+On the Pi, as the user Claude should log in as (not root), in the repository folder:
+
+```
+bash give-claude-access.sh
+```
+
+It asks for sudo, installs and starts the OpenSSH server (Raspberry Pi OS ships with it off), adds a
+key for Claude to that user's `~/.ssh/authorized_keys` and writes the same kind of file. Import it on
+your computer as above; `remote.ps1` then runs bash code there instead of PowerShell. It does not
+switch password logins off: do that yourself before you forward a port to the Pi from the internet.
+
 ## Set up step by step
 
 On the PC, in PowerShell run as administrator, in the repository folder:

@@ -1,4 +1,5 @@
-# Sets this computer up to reach a PC over SSH from the file that give-claude-access.bat wrote there.
+# Sets this computer up to reach a PC over SSH from the file that give-claude-access.bat (Windows) or
+# give-claude-access.sh (Linux, a Raspberry Pi) wrote there.
 # No admin rights needed. Run in PowerShell:
 #     powershell -ExecutionPolicy Bypass -File ssh\import-access.ps1 <claude-access-PC.json> `
 #         [-Name <alias>] [-PublicHost <ip or DNS name>] [-PublicPort <port>]
@@ -18,7 +19,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $access = Get-Content $File -Raw -Encoding UTF8 | ConvertFrom-Json
-if ($access.format -ne 'screensender-access/1') { throw "$File is not a file from give-claude-access.bat." }
+if ($access.format -ne 'screensender-access/1') { throw "$File is not a file from give-claude-access.bat or .sh." }
 if (-not $Name) { $Name = $access.computer.ToLower() }
 if ($Name -notmatch '^[A-Za-z0-9_.-]+$') { throw "Give -Name: '$Name' does not suit an ssh alias." }
 $port = [int]$access.port
@@ -64,7 +65,9 @@ if ($old -and -not $old.EndsWith("`n")) { $old += "`n" }
 
 # ---- aliases and notes for Claude
 
-$arguments = @{ User = $access.user; Name = $Name; Port = $port; RemoteDir = $access.repo }
+# A file from give-claude-access.sh (Linux) says "shell": "bash"; the Windows one has no such field.
+$shell = if ($access.shell) { $access.shell } else { 'powershell' }
+$arguments = @{ User = $access.user; Name = $Name; Port = $port; RemoteDir = $access.repo; Shell = $shell }
 if ($lanHost) { $arguments.LanHost = $lanHost }
 if ($tsHost) { $arguments.TailscaleHost = $tsHost }
 if ($PublicHost) { $arguments.PublicHost = $PublicHost; $arguments.PublicPort = $PublicPort }

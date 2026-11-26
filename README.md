@@ -2,7 +2,7 @@
 
 **English** | [Русский](README.ru.md)
 
-Control a Windows PC from a browser. ScreenSender shows the desktop on a web page, and you click,
+Control a Windows PC (or a Raspberry Pi) from a browser. ScreenSender shows the desktop on a web page, and you click,
 scroll and type on it. With the SSH setup in [`ssh/`](ssh/README.md), an AI agent on your laptop
 (Claude Code, Codex) can work on the same PC as well.
 
@@ -13,7 +13,7 @@ or RDP over Tailscale. ScreenSender is for machines where nobody is around, such
 the agent installs and fixes things over SSH, and you look at the screen in a browser. I first made
 it to use my own PC while I was on a trip.
 
-It is a single Python file and a web page, built for slow links: only the parts of the screen that
+It is a Python server and a web page, built for slow links: only the parts of the screen that
 changed are sent, so a still screen costs no traffic at all.
 
 ## Screen and command line together
@@ -111,8 +111,8 @@ CLAUDE.md. To do it by hand, see [Quick start](#quick-start).
 
 ## Requirements
 
-- Windows 10 or 11 on the PC. Mouse and keyboard input use the Windows API; on other systems
-  the page is view-only.
+- Windows 10 or 11 on the PC, or Linux: a Raspberry Pi with Raspberry Pi OS, see
+  [Raspberry Pi and Linux](#raspberry-pi-and-linux).
 - Python 3.10 or newer.
 - Any modern browser, on a computer or a phone: Chrome, Edge, Safari, Firefox.
 
@@ -157,6 +157,33 @@ or other devices will not reach the PC.
 
 With [Tailscale](https://tailscale.com) on the PC and on the device you connect from, no port
 forwarding is needed: the startup output then shows the PC's Tailscale address as well.
+
+### Raspberry Pi and Linux
+
+On a Raspberry Pi (or another Debian-like Linux), as the desktop user:
+
+```
+git clone https://github.com/parhipov/ScreenSender.git ~/ScreenSender
+cd ~/ScreenSender
+cp config.example.json config.json      # set username and password
+bash deploy/install.sh
+```
+
+`install.sh` installs what it needs, sets up a virtual mouse and keyboard (`/dev/uinput`), and starts
+the server as a systemd user service from boot. To try it without that: `python3 -m venv .venv`,
+`.venv/bin/pip install -r requirements.txt`, `.venv/bin/python server.py`.
+
+The server finds the screen itself, and follows it when the desktop starts later or changes:
+
+- **Wayland** (Raspberry Pi OS's desktop, labwc or wayfire; any wlroots compositor): the picture
+  through `grim`, text through `wtype`, the clipboard through `wl-clipboard`. GNOME and KDE are not
+  supported.
+- **X11**: the picture through mss, as on Windows; text through `xdotool`, the clipboard through `xclip`.
+- **No desktop**: a program that draws into the framebuffer `/dev/fb0` (Qt's `linuxfb`, the console).
+  Programs drawing through DRM directly (Qt's `eglfs`) cannot be seen.
+
+Clicks, the wheel and keys go through `/dev/uinput`, which every one of these reads. The Windows-only
+keys (Task Manager, Win+R...) are hidden on the page.
 
 ## Using it
 
@@ -351,13 +378,15 @@ the screenshots.
 | File | What it is |
 |---|---|
 | `server.py` | The whole server: capture, tiles, web endpoints, input, HTTPS. |
+| `linux.py` | The Linux side: finding the screen (Wayland, X11, framebuffer), capture, input through uinput. |
 | `static/index.html` | The viewer page: drawing, zoom, gestures, keyboard panel. |
 | `static/login.html` | The login page. |
 | `config.example.json` | Example settings to copy to `config.json`. |
-| `deploy/` | Supervisor, update with rollback and the install script for unattended use. |
+| `deploy/` | Supervisor, update with rollback and the install scripts for unattended use (`install.ps1` for Windows, `install.sh` for Linux). |
 | `CLAUDE.md` | How to install, leave and update an unattended PC, written for Claude Code. |
 | `ssh/` | SSH access to the PC for Claude Code, separate from ScreenSender. |
 | `give-claude-access.bat` | One double-click on a PC: SSH access for Claude and a file with all it needs ([ssh/README.md](ssh/README.md#the-quickest-way-one-file)). |
+| `give-claude-access.sh` | The same on a Raspberry Pi or another Linux PC. |
 | `docs/` | Pictures for this README. |
 
 ## License

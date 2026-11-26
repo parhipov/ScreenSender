@@ -11,7 +11,7 @@ way in. If the server stops and does not come back, they lose the PC until someo
 - Stop or restart the installed server only with `deploy\update.py` (through its scheduled task) or
   `deploy\install.ps1`. Both start it again and check that it works. Never kill python processes,
   never end the `ScreenSender` task by hand.
-- Never start another copy on the installed port. To try code, copy `server.py` and `static\` to a temp
+- Never start another copy on the installed port. To try code, copy `server.py`, `linux.py` and `static\` to a temp
   folder with its own `config.json` on another port (e.g. 8765), and stop that copy when done.
 - Ask before you lock, sign out, sleep, shut down or reboot the PC, or change network adapters,
   the firewall, power settings, or `username`, `password`, `port`, `https` in `config.json`.
@@ -190,6 +190,61 @@ their OK; the physical items are theirs.
   read its warnings), the router's port forwarding, or a changed public IP.
 - **Log out every device** (a lost phone): delete `secret.key`, then run `deploy\install.ps1`.
 
+## Linux (Raspberry Pi)
+
+`server.py` runs on Linux too, through `linux.py`. It finds the screen by itself and follows it when
+it changes: a Wayland desktop (labwc or wayfire, Raspberry Pi OS's default; grim takes the picture),
+X11 (mss), or no desktop at all, a program drawing into `/dev/fb0` (Qt's linuxfb). Programs that
+draw through DRM directly (Qt's eglfs, a kiosk without a compositor) do not show there. Clicks and
+keys go through `/dev/uinput`; text in any language through wtype (Wayland) or xdotool (X11). The
+same rules hold, translated:
+
+- The server runs as the desktop user, from the systemd user service `screensender` (the supervisor),
+  with linger, so it starts at boot. Never kill python processes, never `systemctl --user stop`
+  or `restart screensender` by hand; `deploy/install.sh` and the update do that and check the result.
+- Updates: `systemctl --user start screensender-update`, then poll `runtime/update.log` for the
+  RESULT line, as in Update above. The codes mean the same. If the note says the supervisor or
+  `deploy/install.sh` changed, run `bash deploy/install.sh` again.
+- Over SSH run these as that user (the one `give-claude-access.sh` set up), not as root: user services
+  live in the user's systemd.
+
+### Install
+
+1. `sudo apt install git python3-venv`, then `git clone https://github.com/parhipov/ScreenSender.git ~/ScreenSender`.
+2. `cp config.example.json config.json`; the user sets the login and password, `"https": true` for
+   the internet.
+3. Tailscale first if it is wanted (see [ssh/CLAUDE.md](ssh/CLAUDE.md)), so the certificate covers it.
+4. `bash deploy/install.sh` as the desktop user. It installs the packages (grim, wtype, wl-clipboard,
+   wlr-randr, xdotool, xclip), makes `.venv`, gives this user `/dev/uinput` (a udev rule), sets up the
+   services and linger, allows the port in ufw if ufw is on, and must end with "The server is up".
+5. Check from the phone: the picture, a tap, typing. The first start of the desktop after the install
+   may need a reboot before clicks work (the uinput module and the udev rule); ask first.
+
+### Before the user leaves (what differs from Windows)
+
+- **Automatic sign-in** to the desktop: `sudo raspi-config` → System Options → Boot / Auto Login →
+  Desktop Autologin (`sudo raspi-config nonint do_boot_behaviour B4`). Without it the screen shows
+  the login prompt, which ScreenSender sees but the user would have to sign in through.
+- **No screen blanking:** `sudo raspi-config nonint do_blanking 1` (Display Options → Screen Blanking).
+- **Power:** a Pi starts by itself when power comes back; a smart plug is the remote power switch.
+- **SD card:** the weakest part; a USB SSD or a good card, and a copy of the image before the trip.
+- No UAC, no BitLocker, no Windows Update; `sudo apt upgrade` only while the user is around.
+- The rest of the Windows checklist applies as it is: the way in from outside, a second way in, the
+  external monitor, the password in the phone, and the final test with a reboot (`sudo reboot`).
+
+### Troubleshooting
+
+- **Is it up?** `systemctl --user status screensender`;
+  `curl -sk -o /dev/null -w "%{http_code}" https://127.0.0.1:8005/health`; `tail -30 runtime/server.log`.
+  The log says which screen was found: `screen: Wayland (wayland-0)`, `X11 (:0)`, `the framebuffer`.
+- **A black or old picture:** the desktop draws through DRM and not into `/dev/fb0` (eglfs), or the
+  compositor is not a wlroots one (GNOME, KDE): grim cannot take its picture.
+- **Clicks do nothing, or answer 503:** `ls -l /dev/uinput` must show the user as owner; if not,
+  `sudo modprobe uinput` and `bash deploy/install.sh` again. Without uinput only xdotool on X11 and
+  wtype on Wayland (keys only) remain.
+- **Russian text arrives as Latin letters or not at all** on the framebuffer: without wtype or
+  xdotool only ASCII is typed, as US-layout keys.
+
 ## Development
 
 - Code comments are in English. The pages show Russian when the browser prefers it and English
@@ -201,3 +256,7 @@ their OK; the physical items are theirs.
 - `deploy\update.py`, `deploy\supervisor.py` and `deploy\install.ps1` are what keep the user
   connected. Test changes to them in a sandbox (own bare repo and clone, renamed tasks and firewall
   rules), never on the live install.
+- The Linux side can be tried in WSL without a Pi: Xvfb + xdotool + xclip for X11, labwc with
+  `WLR_BACKENDS=headless WLR_RENDERER=pixman` + grim + wtype + wl-clipboard + wlr-randr for Wayland,
+  and systemd in the distro for `deploy/install.sh`. WSL's kernel has no uinput: clicks through it, and
+  the framebuffer, need the real Pi.

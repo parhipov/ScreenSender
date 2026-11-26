@@ -2,6 +2,7 @@
 
 Normally started through the "ScreenSender update" scheduled task:  schtasks /Run /TN "ScreenSender update"
 It can also be run from an elevated shell:  .venv\\Scripts\\python.exe deploy\\update.py
+Linux: systemctl --user start screensender-update  (or .venv/bin/python deploy/update.py)
 
 Pulls the upstream branch, restarts the server through the supervisor, and checks the new version:
 it must answer, keep answering, and let the check in common.smoke_test log in and use the page's
@@ -19,19 +20,15 @@ import subprocess
 import sys
 import time
 
-from common import HOLD, ROOT, RUNTIME, VENV_PYTHON, alive, base_url, kill_server, server_pid, smoke_test, status
+from common import (HOLD, IS_WINDOWS, NO_WINDOW, ROOT, RUNTIME, VENV_PYTHON, alive, base_url, kill_server, lock,
+                    locked, server_pid, smoke_test, status)
 
 LOG = RUNTIME / "update.log"
 
 START_TIMEOUT = 60   # for the new server to answer
 STAY_UP = 10         # and then to keep answering
 CRASH_STARTS = 3     # this many starts without an answer: it exits at start, roll back at once
-SYNCHRONIZE = 0x00100000
-ERROR_ALREADY_EXISTS = 183
-
-kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-kernel32.OpenMutexW.restype = ctypes.c_void_p
-kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+INSTALLER = "deploy/install.ps1" if IS_WINDOWS else "deploy/install.sh"
 
 
 class Refused(Exception):
@@ -47,8 +44,7 @@ def log(text):
 
 def run(*cmd, timeout=120):
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0")  # a credential prompt would hang with no window
-    r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=timeout, env=env,
-                       creationflags=subprocess.CREATE_NO_WINDOW)
+    r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=timeout, env=env, **NO_WINDOW)
     if r.returncode:
         raise RuntimeError(f"{' '.join(cmd)} failed: {(r.stderr or r.stdout).strip()}")
     return r.stdout.strip()
@@ -59,10 +55,7 @@ def git(*args):
 
 
 def supervisor_running():
-    handle = kernel32.OpenMutexW(SYNCHRONIZE, False, "Local\\ScreenSenderSupervisor")
-    if handle:
-        kernel32.CloseHandle(handle)
-    return bool(handle)
+    return locked("supervisor")
 
 
 def answers():
@@ -103,7 +96,8 @@ def switch(commit, requirements_changed):
     HOLD.touch()
     try:
         if not kill_server(before):
-            raise Refused("could not stop the server; run this elevated or through the scheduled task")
+            raise Refused("could not stop the server; run this elevated or through the scheduled task"
+                          if IS_WINDOWS else "could not stop the server; run this as the user it runs as")
         git("reset", "--hard", "--quiet", commit)
         if requirements_changed:
             log("installing requirements")
@@ -115,7 +109,7 @@ def switch(commit, requirements_changed):
 
 
 def update():
-    if not ctypes.windll.shell32.IsUserAnAdmin():
+    if IS_WINDOWS and not ctypes.windll.shell32.IsUserAnAdmin():
         raise Refused("not elevated: the server runs as administrator and cannot be stopped from here")
     if not supervisor_running():
         raise Refused("the supervisor is not running, so nothing would start the server again")
@@ -125,8 +119,7 @@ def update():
         return 0, "already up to date"
     if git("status", "--porcelain", "--untracked-files=no"):
         raise Refused("tracked files have local changes; commit or discard them first")
-    if subprocess.run(["git", "merge-base", "--is-ancestor", old, new], cwd=ROOT,
-                      creationflags=subprocess.CREATE_NO_WINDOW).returncode:
+    if subprocess.run(["git", "merge-base", "--is-ancestor", old, new], cwd=ROOT, **NO_WINDOW).returncode:
         raise Refused("the local branch has commits that are not upstream")
     changed = git("diff", "--name-only", old, new).splitlines()
     requirements_changed = "requirements.txt" in changed
@@ -143,9 +136,9 @@ def update():
         if healthy(before):
             if any(name in changed for name in ("deploy/supervisor.py", "deploy/common.py")):
                 log("note: the supervisor changed; the running one is the old one until the next "
-                    "sign-in or until deploy/install.ps1 is run again")
-            if "deploy/install.ps1" in changed:
-                log("note: deploy/install.ps1 changed; run it again to apply the changes")
+                    f"sign-in or until {INSTALLER} is run again")
+            if INSTALLER in changed:
+                log(f"note: {INSTALLER} changed; run it again to apply the changes")
             return 0, f"updated to {new[:7]}"
         log("the new version does not work; rolling back")
 
@@ -160,8 +153,7 @@ def update():
 
 def main():
     RUNTIME.mkdir(exist_ok=True)
-    kernel32.CreateMutexW(None, False, "Local\\ScreenSenderUpdate")
-    if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
+    if not lock("update"):
         log("RESULT 1: another update is running")
         return 1
     log("update started")

@@ -98,7 +98,7 @@
     <button data-key="z" data-mods="ctrl" data-t="undo">Undo</button>
     <button data-key="f5">F5</button>
   </div>
-  <div class="keys">
+  <div class="keys" id="windowsKeys">
     <button data-key="esc" data-mods="ctrl,shift" data-t="taskManager">Task Manager</button>
     <button data-key="r" data-mods="win">Win+R</button>
     <button data-key="d" data-mods="win">Win+D</button>
@@ -391,6 +391,8 @@ function loadInfo() {
     refreshMonitor();
     captureName = info.capture;
     inputAllowed = info.input;
+    // Task Manager, Win+R and the like are Windows shortcuts.
+    if (info.os && info.os !== 'windows') document.getElementById('windowsKeys').style.display = 'none';
     if (!inputAllowed) {
       clicksOn = false;
       clicksBtn.style.display = 'none';
