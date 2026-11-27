@@ -324,7 +324,7 @@ curl -b jar -H "Content-Type: application/json" -d '{"x": 0.5, "y": 0.25}' http:
 
 | Request | What it does |
 |---|---|
-| `GET /screenshot` | The shown monitor as a JPEG, scaled to `max_width`, taken after the request arrived. The pointer is not drawn; the `X-Cursor` header gives its position. |
+| `GET /screenshot` | The shown monitor as a JPEG, scaled to `max_width`, taken after the request arrived. The pointer is not drawn; the `X-Cursor` header gives its position. On Wayland the pointer is drawn in and there is no `X-Cursor`. |
 | `POST /click` | `{"x", "y", "button": "right", "mods": ["ctrl"]}`; `button` and `mods` are optional. |
 | `POST /mouse` | `{"actions": [{"drag": "down", "x", "y"}, {"drag": "move", …}, {"drag": "up", …}]}`: a drag with the left button. |
 | `POST /scroll` | `{"x", "y", "dy", "dx"}`: wheel notches; positive `dy` scrolls up. |

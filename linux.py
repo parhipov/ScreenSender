@@ -289,15 +289,17 @@ class WaylandCapture(_Capture):
     name = "Wayland"
     session = "wayland"
 
-    def __init__(self, monitor):
+    def __init__(self, monitor, cursor=True):
         if not _tool("grim"):
             raise RuntimeError("grim is not installed (sudo apt install grim)")
         self.monitor = monitor
+        self._cursor = ["-c"] if cursor else []
         self._last = None
 
     def grab(self):
         m = self.monitor
-        data = _run(["grim", "-t", "ppm", "-g", f"{m['left']},{m['top']} {m['width']}x{m['height']}", "-"])
+        data = _run(["grim", *self._cursor, "-t", "ppm",
+                     "-g", f"{m['left']},{m['top']} {m['width']}x{m['height']}", "-"])
         if data == self._last:
             return None  # the same picture: nothing to scale and compare
         self._last = data
@@ -391,12 +393,13 @@ class FbCapture(_Capture):
             self._fd = None
 
 
-def open_capture(monitor):
+def open_capture(monitor, cursor=True):
+    """cursor: on Wayland the compositor draws the pointer into the picture (see cursor_pos)."""
     s = current_session() or session()
     if s == "x11":
         return X11Capture(monitor)
     if s == "wayland":
-        return WaylandCapture(monitor)
+        return WaylandCapture(monitor, cursor)
     if s == "fb":
         return FbCapture(monitor)
     raise RuntimeError("no screen: no Wayland, X11 or framebuffer")
@@ -451,12 +454,19 @@ _xpointer = _XPointer()
 
 
 def cursor_pos():
-    """The pointer in desktop pixels: asked from X, else where uinput last put it."""
-    if current_session() == "x11":
+    """The pointer in desktop pixels: asked from X; on the framebuffer, where uinput last put it.
+
+    None on Wayland: a client cannot ask where the pointer is, and where uinput last put it is
+    wrong once a real mouse moves it (and unknown until the first tap). grim -c draws the real
+    pointer into the picture instead."""
+    s = current_session()
+    if s == "x11":
         try:
             return _xpointer.pos()
         except Exception:  # noqa: BLE001 - no Xlib: no pointer drawn
             return None
+    if s == "wayland":
+        return None
     return _pointer_at
 
 

@@ -708,7 +708,7 @@ class Grabber(threading.Thread):
 
     def _open_capture(self, monitor):
         if not IS_WINDOWS:
-            return linux.open_capture(monitor)
+            return linux.open_capture(monitor, cursor=self.draw_cursor)
         if self._want_dxgi():
             try:
                 return DxgiCapture(monitor)
