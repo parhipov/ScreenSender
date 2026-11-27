@@ -13,3 +13,5 @@ secret.key
 # give-claude-access.bat output: holds a private key
 claude-access-*.json
 income/
+# Local build outputs (the Clash Verge installer there holds VPN credentials)
+out/
